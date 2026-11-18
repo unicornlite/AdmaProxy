@@ -2,8 +2,6 @@
 
 by Unicornlite (https://github.com/unicornlite)
 
-Based on GrowtopiaProxy by batutekoz77.
-
 AdmaProxy is a bridge proxy for Growtopia on Windows. It sits between the game
 client and the server, so it can inspect, modify, and inject packets in real
 time. Everything is controlled from inside the game with slash commands: type
