@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <mutex>
+#include <chrono>
 
 class NetworkManager {
 public:
@@ -22,6 +23,17 @@ public:
     std::unordered_map<ENetPeer*, ENetPeer*> server_to_client;
 
     std::mutex peer_mutex;
+
+    /* @info: Batch 6 - auto reconnect state. When the server drops the
+       connection and auto-reconnect is on, the proxy keeps the client
+       peer and retries the server in the main loop (up to 5 attempts,
+       5 seconds apart). The probe peer only checks that the server
+       answers; the real session resumes through OnSendToServer. */
+    bool reconnectArmed = false;
+    int reconnectAttempts = 0;
+    std::chrono::steady_clock::time_point reconnectNext{};
+    ENetPeer* reconnectProbe = nullptr;
+    ENetPeer* reconnectClient = nullptr;
 
 public:
     enum {
@@ -184,4 +196,4 @@ private:
     ENetAddress SERVER_ADDRESS{};
 
 };
-extern NetworkManager Network;
+extern NetworkManager Network;

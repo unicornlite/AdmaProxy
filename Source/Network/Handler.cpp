@@ -121,6 +121,20 @@ bool HandlePacket(int type, ENetPacket* packet, ENetPeer* to) {
             if (Packet::ContainsValue<std::string>(text, "mac")) Player.mac = Packet::ExtractValue<std::string>(text, "mac", "");
             if (Packet::ContainsValue<std::string>(text, "wk")) Player.wk = Packet::ExtractValue<std::string>(text, "wk", "");
 
+            /* @info: Batch 6 - device spoof. Only values of existing
+               fields are changed, never added or removed, so the
+               field-name hash (fhash) stays valid. Applies to the
+               game-server login packet only; the HTTPS GrowID login
+               goes straight to login.growtopiagame.com. */
+            if (Method == "CLIENT -> PROXY -> SERVER" && Player.ApplySpoof(text)) {
+                LOG_INFO("Login spoofed as [{}] (platformID {})", Player.spoofProfile, Player.SpoofPlatformID());
+                {
+                    std::lock_guard<std::mutex> lock(Network.peer_mutex);
+                    SendPacket(SERVER, Network.NET_MESSAGE_GENERIC_TEXT, text.c_str(), text.length());
+                }
+                return false;
+            }
+
             return true;
         }
         else if (Packet::Contains(text, "action|dialog_return\ndialog_name|PROXY_DIALOGS")) return PROXY_DIALOGS::Inject(text, CLIENT, SERVER);
@@ -296,4 +310,4 @@ bool HandlePacket(int type, ENetPacket* packet, ENetPeer* to) {
     }
 
     return true;
-}
+}

@@ -121,6 +121,30 @@ see your real name and clothes.
   back, mask, necklace. `/vset <slot> off` restores that slot, plain
   `/vset` lists the current overrides, `/vsetreset` clears them all.
 
+### Utilities
+
+- `/mods` - Lists moderators currently in this world (mod or super mod,
+  and whether they are invisible). A mod who never spawns cannot be seen.
+- `/logs` - Shows the last drop/collect events in this session (like
+  CCTV). `/logs clear` clears the in-memory list. Every event is also
+  appended to `logs.txt` in the proxy folder.
+- `/autoreconnect` - Toggles auto reconnect. If the server drops the
+  connection, the proxy retries up to 5 times (5 seconds apart) and asks
+  the client to re-enter with the last session token.
+- `/setsave <1-4>` - Saves the clothes you are wearing right now as set
+  1-4 (persisted in `sets.txt`). Note: `/setsave <world>` still sets the
+  save world; a single digit 1-4 means a clothing set.
+- `/set <1-4>` - Wears a saved clothing set. Aliases: `/set1` to `/set4`.
+- `/sets` - Lists the saved clothing sets.
+- `/pinglive` - Toggles live ping: the real client + server ping is
+  logged to the proxy console every 10 seconds.
+- `/autoreply` - Auto-replies to world chat. `/autoreply add <keyword>
+  <reply>`, `/autoreply del <keyword>`, `/autoreply list`,
+  `/autoreply on` / `/autoreply off`. Rules persist in `autoreply.txt`.
+- `/spoof <android|ios|pc|off>` - Spoofs the device/platform fields in
+  the login packet. Takes effect on the next full login. Saved to
+  `spoof.txt` and loaded at startup.
+
 ### Information
 
 - `/balance` - Shows your current lock balance.
@@ -289,6 +313,66 @@ see your real name and clothes.
 - **The nick applies on every spawn,** so it survives world changes
   too. Turning zoom off and on keeps the nick: all spawn rewrites
   (country, zoom, nick) go through one resend path.
+
+## Utilities notes
+
+- **`/mods`** reads the `mstate`/`smstate` fields of each player's
+  OnSpawn data, the same detection `/antimod` uses. A mod in invisible
+  mode (`invis|1`) still sends OnSpawn, so it is listed and marked
+  invisible. A mod who never spawns in this world sends nothing and
+  cannot be detected; this feature does not claim otherwise.
+- **`/logs`** records every drop that appears and every drop that leaves
+  the ground. Drops cannot be attributed to a player: the add packet
+  carries no player info (netid -1). A collect names the collector only
+  when the remove packet names one (as in the open reimplementation);
+  otherwise the event is shown as a removal with an unknown collector
+  (the drop expired, or the collector is unknown). The in-memory list
+  holds the last 50 events; `logs.txt` grows without a limit, delete it
+  manually when it gets big. `/logs clear` clears only the in-memory
+  list, not the file.
+- **Auto reconnect** only works after at least one sub-server transfer
+  (entering a world), because that is when the proxy learns a session
+  token. When the server drops, the proxy keeps your client connected
+  and retries the server up to 5 times, 5 seconds apart; if the server
+  answers, it asks the client to re-enter with the last session token.
+  The server may reject a reused token, in which case the client lands
+  on the login screen, same as without the feature. Needs in-game
+  testing. Default off.
+- **Clothing sets** apply with a plain item use (`ITEM_ACTIVATE_REQUEST`,
+  the same packet the client sends when an item is double-clicked in the
+  inventory). That packet form is not verified against a live capture
+  from the official server, so it needs in-game testing. Items already
+  worn in their slot are skipped; an item that is neither worn nor in
+  the inventory cannot be equipped and is reported as missing.
+  Unequipping (a saved slot left empty while something is worn) tries
+  activating the worn item, which is best-effort. Skin color is not
+  part of a set. Sets persist in `sets.txt`.
+- **`/pinglive`** uses the same real RTT source as `/ping` (ENet
+  `roundTripTime` for the client and server peers). It logs to the proxy
+  console, not to the game chat, so it never spams the game.
+- **Auto-reply** triggers on world chat (talk bubbles) only. Whispers
+  are not covered: their packet format is not verified from the
+  available references. Guards: it never replies to your own messages,
+  never replies to server announcements, waits 30 seconds before
+  replying to the same player again, and never sends more than one
+  reply per 2 seconds overall. Rules persist in `autoreply.txt`
+  (keyword and reply separated by a tab).
+- **`/spoof`** rewrites only the platform-identifying fields of the
+  login packet: `platformID`, `deviceVersion`, and on mobile profiles
+  `wk` (Android always sends `NONE0`), `zf` (Windows only, cleared),
+  and `tr` (Android only). The OS codes (0 = Windows, 1 = iOS,
+  4 = Android) come from a private server's login code, the best
+  available evidence; they are not verified against the official
+  server. Device identity fields (`mac`, `rid`, `hash`, `hash2`,
+  `klv`) are left alone on purpose: they are cross-checked by hashes
+  whose algorithm is unknown, so changing them could break login or
+  look inconsistent. Only values of existing fields are changed, never
+  added or removed, so the field-name hash (`fhash`) stays valid.
+  Spoofing covers the ENet game-server login packet only; the HTTPS
+  GrowID login goes straight to `login.growtopiagame.com` and is
+  untouched. It takes effect on the next full login (quit to the menu
+  and log in again), not on world transfers. The profile persists in
+  `spoof.txt` and loads at startup.
 
 ## Screenshots
 

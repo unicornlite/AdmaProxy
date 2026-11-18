@@ -260,6 +260,11 @@ public:
                                 } catch (...) {}
                             }
                         }
+                        /* @info: Batch 6 - chat auto-reply. Runs on the
+                           original text, before any [REAL]/[FAKE] tag. */
+                        if (Player.autoReply && Method == "SERVER -> PROXY -> CLIENT") {
+                            Player.OnChatMessage(static_cast<int>(std::get<unsigned int>(param[1])), param2Text, SERVER);
+                        }
                         textParam += param2Text;
 
                         GamePacket<OnTalkBubble> p;
@@ -344,6 +349,14 @@ public:
                                 return "Invalid newServerIP IP for OnSendToServer!";
                             }
                             Network.GetServerAddress().port = newServerUDP;
+                            /* @info: Batch 6 - keep the session token so
+                               auto-reconnect can ask the client to re-enter
+                               if this server drops the connection. */
+                            Player.lastSessionToken = std::get<int>(param[2]);
+                            Player.lastSessionUserId = std::get<int>(param[3]);
+                            Player.lastSessionDoorID = Packet::ExtractCustom<std::string>(std::get<std::string>(param[4]), "|", 1, "|");
+                            Player.lastSessionUUID = Packet::ExtractCustom<std::string>(std::get<std::string>(param[4]), "|", 2, "|");
+                            Player.lastSessionLmode = std::get<int>(param[5]);
                         }
 
                         {
@@ -478,6 +491,25 @@ public:
 
                                 /* @info: Anti-Mod - moderators carry mstate (mod) or smstate (super mod) in their
                                    spawn data. Leave the moment one spawns, including mods already inside when we join. */
+                                /* @info: Batch 6 - track moderators for /mods.
+                                   mstate/smstate mark mod/super mod; invis
+                                   marks a mod the client does not render.
+                                   A mod who never spawns cannot be seen. */
+                                {
+                                    int mstate = Packet::ExtractValue<int>(spawnText, "mstate", 0);
+                                    int smstate = Packet::ExtractValue<int>(spawnText, "smstate", 0);
+                                    int invis = Packet::ExtractValue<int>(spawnText, "invis", 0);
+                                    if (mstate != 0 || smstate != 0) {
+                                        PlayerState::ModInfo info;
+                                        info.name = thatName;
+                                        info.mstate = mstate;
+                                        info.smstate = smstate;
+                                        info.invis = invis;
+                                        Player.worldMods[thatNetID] = info;
+                                    }
+                                    else Player.worldMods.erase(thatNetID);
+                                }
+
                                 if (Player.antiMod && Method == "SERVER -> PROXY -> CLIENT") {
                                     int mstate = Packet::ExtractValue<int>(spawnText, "mstate", 0);
                                     int smstate = Packet::ExtractValue<int>(spawnText, "smstate", 0);
@@ -493,6 +525,7 @@ public:
                     else if (std::get<std::string>(param[0]) == "OnRemove" && param.size() == 3) {
                         int thatNetID = Packet::ExtractCustom<int>(std::get<std::string>(param[1]), "|", 1, "\n");
                         Player.worldPlayers.erase(thatNetID);
+                        Player.worldMods.erase(thatNetID);
                         {
                             std::lock_guard<std::mutex> lock(Player.worldMutex);
                             Player.playerPositions.erase(thatNetID);
@@ -630,4 +663,4 @@ private:
         cursor += sizeof(long long);
         return v;
     }
-};
+};

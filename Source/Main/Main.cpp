@@ -2,6 +2,7 @@
 #include "../Functions/Functions.hpp"
 #include "../Http/Http.hpp"
 #include "../Network/Network.hpp"
+#include "../Player/Player.hpp"
 
 #include <thread>
 
@@ -33,6 +34,10 @@ auto main() -> int {
     FastLog::Logger::instance().start();
     FastLog::Logger::set_thread_name("MAIN");
 
+    /* @info: Batch 6 - load the saved spoof profile (if any) before the
+       client logs in, so the first login of the session is spoofed. */
+    Player.LoadSpoofProfile();
+
     LOG_WARN("Setting up all threads");
 
     std::thread http_thread(&HttpManager::Injector, &Http);
@@ -53,4 +58,4 @@ auto main() -> int {
     FastLog::Logger::instance().stop();
 
     return EXIT_SUCCESS;
-}
+}

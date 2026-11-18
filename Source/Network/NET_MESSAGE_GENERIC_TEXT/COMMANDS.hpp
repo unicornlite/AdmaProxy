@@ -83,6 +83,17 @@ public:
 			p.text += "add_custom_textbox|`4/vset <slot> <itemID>  `o(Changes One Clothing Slot On Your Screen Only)|size:small|\n";
 			p.text += "add_custom_textbox|`4/vsetreset  `o(Restores Your Real Clothes)|size:small|\n";
 			p.text += "add_spacer|small|\n";
+			p.text += "add_custom_textbox|`wUtilities:|size:medium|\n";
+			p.text += "add_custom_textbox|`4/mods  `o(Lists Moderators In This World)|size:small|\n";
+			p.text += "add_custom_textbox|`4/logs  `o(Shows Recent Drop/Collect Events)|size:small|\n";
+			p.text += "add_custom_textbox|`4/autoreconnect  `o(Retries The Server When It Drops)|size:small|\n";
+			p.text += "add_custom_textbox|`4/setsave <1-4>  `o(Saves Your Current Clothes As A Set)|size:small|\n";
+			p.text += "add_custom_textbox|`4/set <1-4>  `o(Wears A Saved Clothing Set)|size:small|\n";
+			p.text += "add_custom_textbox|`4/sets  `o(Lists Saved Clothing Sets)|size:small|\n";
+			p.text += "add_custom_textbox|`4/pinglive  `o(Logs Your Ping Every 10 Seconds)|size:small|\n";
+			p.text += "add_custom_textbox|`4/autoreply  `o(Auto-Replies To World Chat)|size:small|\n";
+			p.text += "add_custom_textbox|`4/spoof <android/ios/pc/off>  `o(Spoofs The Login Device)|size:small|\n";
+			p.text += "add_spacer|small|\n";
 			p.text += "add_custom_textbox|`wInformation:|size:medium|\n";
 			p.text += "add_custom_textbox|`4/balance  `o(Shows Your Current World Lock Balance)|size:small|\n";
 			p.text += "add_custom_textbox|`4/account  `o(Opens a Menu That Displays All Your Account Informations)|size:small|\n";
@@ -464,6 +475,30 @@ public:
 		else if (Packet::Contains(command, "/setsave ")) {
 			std::string newSave = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
 			if (newSave.empty()) return true;
+			/* @info: Batch 6 - a single digit 1-4 saves a clothing set
+			   instead of a save world. */
+			if (newSave.size() == 1 && newSave[0] >= '1' && newSave[0] <= '4') {
+				int slot = newSave[0] - '0';
+				std::string text;
+				if (!Player.clothesKnown) text = "Your clothes are not known yet. Wait for them to load and try again.";
+				else if (Player.SaveClothingSet(slot)) text = "Clothing set " + std::to_string(slot) + " saved. Wear it with /set " + std::to_string(slot) + ".";
+				else text = "Could not save clothing set " + std::to_string(slot) + ".";
+
+				{
+					GamePacket<OnConsoleMessage> p;
+					p.text = text;
+					SendGamePacket(CLIENT, p);
+				}
+
+				{
+					GamePacket<OnTalkBubble> p;
+					p.netId = Player.netID;
+					p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+					SendGamePacket(CLIENT, p);
+				}
+
+				return false;
+			}
 			Player.saveWorld = newSave;
 
 			std::string text = "Changed the saving world with [" + newSave + "]";
@@ -1696,6 +1731,214 @@ public:
 			return false;
 		}
 
+		else if (command == "/mods") {
+			Player.ShowMods(CLIENT);
+			return false;
+		}
+
+		else if (command == "/logs") {
+			Player.ShowLog(CLIENT);
+			return false;
+		}
+
+		else if (command == "/logs clear") {
+			Player.ClearLog();
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = "Event log cleared (logs.txt kept).";
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/autoreconnect") {
+			std::string text;
+			if (Player.autoReconnect) {
+				Player.autoReconnect = false;
+				if (Network.reconnectArmed) {
+					Network.reconnectArmed = false;
+					if (Network.reconnectProbe) { enet_peer_disconnect_now(Network.reconnectProbe, 0); Network.reconnectProbe = nullptr; }
+					if (Network.reconnectClient) { enet_peer_disconnect_now(Network.reconnectClient, 0); Network.reconnectClient = nullptr; }
+					text = "Auto-reconnect deactivated! A pending reconnect was cancelled.";
+				}
+				else text = "Auto-reconnect deactivated!";
+			}
+			else {
+				Player.autoReconnect = true;
+				text = "Auto-reconnect activated! If the server drops, the proxy retries 5 times and re-enters with the last session token.";
+				if (!Player.HasSessionToken()) text += " (No session token yet: join a world first.)";
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/sets") {
+			Player.ShowClothingSets(CLIENT);
+			return false;
+		}
+
+		else if (command == "/set1" || command == "/set2" || command == "/set3" || command == "/set4" || command == "/set" || Packet::Contains(command, "/set ")) {
+			int slot = -1;
+			if (command.size() == 5 && command[4] >= '1' && command[4] <= '4') slot = command[4] - '0';
+			else if (Packet::Contains(command, "/set ")) {
+				std::string arg = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				if (arg.size() == 1 && arg[0] >= '1' && arg[0] <= '4') slot = arg[0] - '0';
+			}
+
+			if (slot < 0) {
+				GamePacket<OnConsoleMessage> p;
+				p.text = "Usage: /set <1-4> (or /set1 to /set4)";
+				SendGamePacket(CLIENT, p);
+			}
+			else {
+				GamePacket<OnConsoleMessage> p;
+				p.text = "Applying clothing set " + std::to_string(slot) + "...";
+				SendGamePacket(CLIENT, p);
+				std::thread(&PlayerState::ApplyClothingSet, &Player, slot, CLIENT, SERVER).detach();
+			}
+
+			return false;
+		}
+
+		else if (command == "/pinglive") {
+			std::string text;
+			if (Player.pingLive) {
+				text = "Ping live deactivated!";
+				Player.pingLive = false;
+			}
+			else {
+				text = "Ping live activated! Ping is logged to the proxy console every 10 seconds.";
+				Player.pingLive = true;
+				Player.pingLiveGen++;
+				Player.pingLiveWorker = std::thread(&PlayerState::PingLiveLoop, &Player, CLIENT, SERVER, Player.pingLiveGen.load());
+				Player.pingLiveWorker.detach();
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/autoreply" || Packet::Contains(command, "/autoreply ")) {
+			std::string text;
+			bool showList = false;
+			if (command == "/autoreply") {
+				showList = true;
+			}
+			else {
+				std::string rest = command.substr(11);
+				if (rest == "on") {
+					Player.autoReply = true;
+					Player.LoadAutoReplies();
+					text = "Auto-reply ON (" + std::to_string(Player.autoReplies.size()) + " rule(s)).";
+				}
+				else if (rest == "off") {
+					Player.autoReply = false;
+					text = "Auto-reply OFF.";
+				}
+				else if (rest == "list") {
+					showList = true;
+				}
+				else if (rest.starts_with("add ")) {
+					std::string args = rest.substr(4);
+					size_t sp = args.find(' ');
+					if (sp == std::string::npos) {
+						text = "Usage: /autoreply add <keyword> <reply>";
+					}
+					else {
+						std::string keyword = args.substr(0, sp);
+						std::string reply = args.substr(sp + 1);
+						if (Player.AddAutoReply(keyword, reply)) text = "Auto-reply added: [" + keyword + "] -> " + reply;
+						else text = "Could not add that rule (empty keyword or reply).";
+					}
+				}
+				else if (rest.starts_with("del ")) {
+					std::string keyword = rest.substr(4);
+					if (Player.DelAutoReply(keyword)) text = "Auto-reply deleted: [" + keyword + "]";
+					else text = "No rule for keyword [" + keyword + "].";
+				}
+				else {
+					text = "Usage: /autoreply add <keyword> <reply> | del <keyword> | list | on | off";
+				}
+			}
+
+			if (showList) Player.ShowAutoReplies(CLIENT);
+			else {
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/spoof" || Packet::Contains(command, "/spoof ")) {
+			std::string text;
+			if (command == "/spoof") {
+				text = Player.spoofProfile.empty() ? "No spoofing active. Usage: /spoof <android|ios|pc|off>" : ("Spoof profile: " + Player.spoofProfile + " (platformID " + Player.SpoofPlatformID() + "). Applies on the next full login.");
+			}
+			else {
+				std::string profile = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				for (auto& c : profile) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+				if (profile == "off") {
+					Player.spoofProfile.clear();
+					Client.PLATFORM = "0,1,1";
+					Player.SaveSpoofProfile();
+					text = "Spoofing off. Your real device is sent on the next login.";
+				}
+				else if (profile == "android" || profile == "ios" || profile == "pc") {
+					Player.spoofProfile = profile;
+					Client.PLATFORM = Player.SpoofPlatformID();
+					Player.SaveSpoofProfile();
+					text = "Spoof set to " + profile + " (platformID " + Player.SpoofPlatformID() + "). Takes effect on the next full login.";
+				}
+				else {
+					text = "Usage: /spoof <android|ios|pc|off>";
+				}
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
         return true;
     }
-};
+};

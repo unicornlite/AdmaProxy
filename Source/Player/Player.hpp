@@ -108,6 +108,53 @@ public:
        /pasteworld and /pastemusic need no argument after a warp. */
     std::string lastWorldFile;
     std::string lastSongFile;
+    /* @info: Batch 6 - moderators seen in this world, keyed by netId.
+       Filled from OnSpawn (mstate/smstate), cleared on world change. */
+    struct ModInfo {
+        std::string name;
+        int mstate = 0;
+        int smstate = 0;
+        int invis = 0;
+    };
+    std::unordered_map<int, ModInfo> worldMods;
+    /* @info: Batch 6 - drop/collect event log (CCTV). Ring buffer of the
+       last 50 events, newest last; every event is also appended to
+       logs.txt in the proxy folder. Guarded by logMutex. */
+    struct LogEvent {
+        std::string time;
+        std::string kind;
+        std::string text;
+    };
+    std::vector<LogEvent> eventLog;
+    std::mutex logMutex;
+    /* @info: Batch 6 - auto reconnect. When the server drops the
+       connection, the proxy retries it up to 5 times (5s apart) and, if
+       the server answers, asks the client to re-enter with the last
+       session token from OnSendToServer. Default off. */
+    bool autoReconnect = false;
+    int lastSessionToken = -1;
+    int lastSessionUserId = -1;
+    std::string lastSessionDoorID;
+    std::string lastSessionUUID;
+    int lastSessionLmode = 0;
+    /* @info: Batch 6 - live ping. While on, a worker logs the real
+       client + server round-trip time every 10 seconds. */
+    std::atomic<bool> pingLive{ false };
+    std::thread pingLiveWorker;
+    /* @info: Batch 6 - generation counter so an old ping loop that is
+       still winding down stops instead of logging twice after a quick
+       off/on toggle. */
+    std::atomic<int> pingLiveGen{ 0 };
+    /* @info: Batch 6 - chat auto-reply rules (keyword -> reply), loaded
+       from autoreply.txt. Cooldowns are per player (30s). */
+    bool autoReply = false;
+    bool autoRepliesLoaded = false;
+    std::vector<std::pair<std::string, std::string>> autoReplies;
+    std::unordered_map<int, std::chrono::steady_clock::time_point> replyCooldowns;
+    std::chrono::steady_clock::time_point lastReplyAt{};
+    /* @info: Batch 6 - device spoof profile: "", "android", "ios" or
+       "pc". Empty means no spoofing. Loaded from spoof.txt at startup. */
+    std::string spoofProfile;
 
     struct Position {
         float x = 0.0f;
@@ -378,6 +425,30 @@ public:
     bool ResendLocalSpawn(ENetPeer* CLIENT);
     bool ResendClothing(ENetPeer* CLIENT);
 
+    void ShowMods(ENetPeer* CLIENT);
+    void AddLogEvent(const std::string& kind, const std::string& text);
+    void LogDropEvent(int itemId, int amount, float x, float y);
+    void LogCollectEvent(int itemId, int amount, int collectorNetId);
+    void ShowLog(ENetPeer* CLIENT);
+    void ClearLog();
+    bool HasSessionToken() const;
+    void SendReentryToServer(ENetPeer* CLIENT);
+    void PingLiveLoop(ENetPeer* CLIENT, ENetPeer* SERVER, int gen);
+    void LoadAutoReplies();
+    void SaveAutoReplies();
+    bool AddAutoReply(const std::string& keyword, const std::string& reply);
+    bool DelAutoReply(const std::string& keyword);
+    void ShowAutoReplies(ENetPeer* CLIENT);
+    void OnChatMessage(int netId, const std::string& text, ENetPeer* SERVER);
+    bool SaveClothingSet(int slot);
+    bool LoadClothingSet(int slot, int outIds[9]);
+    void ShowClothingSets(ENetPeer* CLIENT);
+    void ApplyClothingSet(int slot, ENetPeer* CLIENT, ENetPeer* SERVER);
+    void LoadSpoofProfile();
+    void SaveSpoofProfile();
+    std::string SpoofPlatformID() const;
+    bool ApplySpoof(std::string& loginText);
+
     void Drop(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);
     void Trash(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);
 
@@ -390,4 +461,4 @@ public:
     void AutoSpam(ENetPeer* CLIENT, ENetPeer* SERVER);
 };
 
-extern PlayerState Player;
+extern PlayerState Player;

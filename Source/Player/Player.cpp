@@ -12,6 +12,9 @@
 #include <sstream>
 #include <cmath>
 #include <queue>
+#include <ctime>
+#include <cctype>
+#include <cstdio>
 
 PlayerState Player;
 
@@ -142,6 +145,19 @@ void PlayerState::Reset() {
     customNick.clear();
     for (int i = 0; i < 9; i++) visualSet[i] = -1;
     clothesKnown = false;
+    worldMods.clear();
+    autoReconnect = false;
+    lastSessionToken = -1;
+    lastSessionUserId = -1;
+    lastSessionDoorID.clear();
+    lastSessionUUID.clear();
+    lastSessionLmode = 0;
+    pingLive = false;
+    autoReply = false;
+    replyCooldowns.clear();
+    /* @info: Batch 6 - spoofProfile, autoReplies and eventLog survive a
+       reset on purpose: the spoof still applies to the next login, the
+       reply rules are user config, and the log is session history. */
     hostCollectAttempts.clear();
     pathfind.running = false;
     pathfind.destX = -1;
@@ -564,6 +580,7 @@ void PlayerState::ClearWorld() {
     worldHeight = 0;
     worldTiles.clear();
     worldDrops.clear();
+    worldMods.clear();
     playerPositions.clear();
     lastMapPacket.clear();
     pathfind.running = false;
@@ -1941,4 +1958,479 @@ bool PlayerState::ResendClothing(ENetPeer* CLIENT) {
     p.ances_unknown_unknown2 = { c.ances_unknown_unknown2.x, c.ances_unknown_unknown2.y, c.ances_unknown_unknown2.z };
     SendGamePacket(CLIENT, p, netID);
     return true;
+}
+
+// ---------------- Batch 6: utilities ----------------
+static std::string Batch6TimeStamp() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return buf;
+}
+
+static std::string ToLowerStr(std::string s) {
+    for (auto& c : s) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+    return s;
+}
+
+static std::string StripChatCodes(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '`' && i + 1 < s.size()) { i++; continue; }
+        out += s[i];
+    }
+    /* @info: Player chat carries an OID: marker; it is not part of the
+       message, so it is stripped before keyword matching. */
+    size_t oid = out.find("OID:");
+    if (oid != std::string::npos) {
+        size_t end = oid + 4;
+        while (end < out.size() && std::isdigit(static_cast<unsigned char>(out[end]))) end++;
+        out.erase(oid, end - oid);
+    }
+    return out;
+}
+
+static void CurrentWornIds(const PlayerState::Clothes& c, int outIds[9]) {
+    outIds[0] = static_cast<int>(c.hair_shirt_pants.x);
+    outIds[1] = static_cast<int>(c.hair_shirt_pants.y);
+    outIds[2] = static_cast<int>(c.hair_shirt_pants.z);
+    outIds[3] = static_cast<int>(c.feet_face_hand.x);
+    outIds[4] = static_cast<int>(c.feet_face_hand.y);
+    outIds[5] = static_cast<int>(c.feet_face_hand.z);
+    outIds[6] = static_cast<int>(c.back_mask_necklace.x);
+    outIds[7] = static_cast<int>(c.back_mask_necklace.y);
+    outIds[8] = static_cast<int>(c.back_mask_necklace.z);
+}
+
+static const char* kClothingSlotNames[9] = { "hair", "shirt", "pants", "feet", "face", "hand", "back", "mask", "necklace" };
+
+// ---------------- /mods ----------------
+void PlayerState::ShowMods(ENetPeer* CLIENT) {
+    GamePacket<OnConsoleMessage> p;
+    if (worldMods.empty()) {
+        p.text = "No moderators in this world.";
+    }
+    else {
+        p.text = "Moderators in this world:";
+        for (const auto& pair : worldMods) {
+            const ModInfo& m = pair.second;
+            p.text += "\n- " + m.name + " (" + (m.smstate != 0 ? std::string("SuperMod") : std::string("Mod"));
+            if (m.invis != 0) p.text += ", invisible";
+            p.text += ")";
+        }
+        p.text += "\nNote: a mod who never spawns in this world cannot be seen.";
+    }
+    SendGamePacket(CLIENT, p);
+}
+
+// ---------------- /logs ----------------
+void PlayerState::AddLogEvent(const std::string& kind, const std::string& text) {
+    LogEvent ev{ Batch6TimeStamp(), kind, text };
+    {
+        std::lock_guard<std::mutex> lock(logMutex);
+        eventLog.push_back(ev);
+        while (eventLog.size() > 50) eventLog.erase(eventLog.begin());
+    }
+    std::ofstream out("logs.txt", std::ios::app);
+    if (out) out << "[" << ev.time << "] " << ev.text << "\n";
+}
+
+void PlayerState::LogDropEvent(int itemId, int amount, float x, float y) {
+    /* @info: A drop cannot be attributed to a player: the add packet
+       carries no player info (netid -1), so drop events have no name. */
+    const Items* it = FindItemById(itemId);
+    std::string name = it ? it->raw_name : ("item " + std::to_string(itemId));
+    int tx = static_cast<int>(x) / 32, ty = static_cast<int>(y) / 32;
+    std::string text = "DROP [" + (world.empty() ? std::string("?") : world) + "] " +
+        std::to_string(amount) + "x " + name + " at (" + std::to_string(tx) + ", " + std::to_string(ty) + ")";
+    AddLogEvent("DROP", text);
+}
+
+void PlayerState::LogCollectEvent(int itemId, int amount, int collectorNetId) {
+    if (itemId <= 0) return;
+    const Items* it = FindItemById(itemId);
+    std::string name = it ? it->raw_name : ("item " + std::to_string(itemId));
+    std::string where = world.empty() ? std::string("?") : world;
+    std::string text;
+    std::string kind;
+    if (collectorNetId == netID) {
+        kind = "COLLECT";
+        text = "COLLECT [" + where + "] you took " + std::to_string(amount) + "x " + name;
+    }
+    else {
+        auto itr = worldPlayers.find(collectorNetId);
+        if (itr != worldPlayers.end()) {
+            kind = "COLLECT";
+            text = "COLLECT [" + where + "] " + itr->second + " took " + std::to_string(amount) + "x " + name;
+        }
+        else {
+            /* @info: The drop vanished but the remove packet named no
+               collector: it expired, or the collector is unknown. */
+            kind = "REMOVE";
+            text = "REMOVE [" + where + "] " + std::to_string(amount) + "x " + name + " left the ground (collector unknown)";
+        }
+    }
+    AddLogEvent(kind, text);
+}
+
+void PlayerState::ShowLog(ENetPeer* CLIENT) {
+    std::vector<LogEvent> copy;
+    {
+        std::lock_guard<std::mutex> lock(logMutex);
+        copy = eventLog;
+    }
+    GamePacket<OnConsoleMessage> p;
+    if (copy.empty()) {
+        p.text = "No drop/collect events logged yet.";
+    }
+    else {
+        p.text = "Last events (full history in logs.txt):";
+        size_t start = copy.size() > 10 ? copy.size() - 10 : 0;
+        for (size_t i = start; i < copy.size(); i++) {
+            p.text += "\n[" + copy[i].time + "] " + copy[i].text;
+        }
+    }
+    SendGamePacket(CLIENT, p);
+}
+
+void PlayerState::ClearLog() {
+    std::lock_guard<std::mutex> lock(logMutex);
+    eventLog.clear();
+}
+
+// ---------------- auto reconnect ----------------
+bool PlayerState::HasSessionToken() const {
+    return lastSessionToken >= 0 && !lastSessionUUID.empty();
+}
+
+void PlayerState::SendReentryToServer(ENetPeer* CLIENT) {
+    /* @info: Asks the client to re-enter through the proxy with the last
+       session token, the same packet the server sends on a sub-server
+       transfer. The server may reject a reused token; then the client
+       lands on the login screen, same as without auto-reconnect. */
+    if (!CLIENT || !HasSessionToken()) return;
+    GamePacket<OnSendToServer> p;
+    p.port = Local.UDP;
+    p.token = lastSessionToken;
+    p.userId = lastSessionUserId;
+    p.ip = Local.IP;
+    p.doorID = lastSessionDoorID;
+    p.UUIDToken = lastSessionUUID;
+    p.lmode = lastSessionLmode;
+    p.tankIDName = tankIDName;
+    SendGamePacket(CLIENT, p);
+}
+
+// ---------------- /pinglive ----------------
+void PlayerState::PingLiveLoop(ENetPeer* CLIENT, ENetPeer* SERVER, int gen) {
+    /* @info: Same real RTT source as /ping (ENet roundTripTime), logged
+       to the proxy console every 10 seconds, not to the game chat.
+       Sleeps in 100ms chunks so the loop stops within ~100ms of being
+       turned off, and exits if a newer loop took over (gen changed). */
+    while (pingLive && gen == pingLiveGen) {
+        for (int i = 0; i < 100 && pingLive && gen == pingLiveGen; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!pingLive || gen != pingLiveGen) break;
+        if (!SERVER || SERVER->state != ENET_PEER_STATE_CONNECTED) {
+            LOG_INFO("Ping live: server not connected");
+            continue;
+        }
+        int serverPing = SERVER->roundTripTime;
+        int clientPing = 0;
+        if (Local.IP != "127.0.0.1" && CLIENT && CLIENT->state == ENET_PEER_STATE_CONNECTED) clientPing = CLIENT->roundTripTime;
+        LOG_INFO("Ping live: {} ms (C{}+S{})", serverPing + clientPing, clientPing, serverPing);
+    }
+}
+
+// ---------------- /autoreply ----------------
+void PlayerState::LoadAutoReplies() {
+    if (autoRepliesLoaded) return;
+    autoRepliesLoaded = true;
+    std::ifstream in("autoreply.txt");
+    if (!in) return;
+    std::string header;
+    if (!std::getline(in, header) || header != "ADMAPROXY-AUTOREPLY-V1") return;
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        std::string keyword = line.substr(0, tab);
+        std::string reply = line.substr(tab + 1);
+        if (keyword.empty() || reply.empty()) continue;
+        autoReplies.emplace_back(keyword, reply);
+    }
+}
+
+void PlayerState::SaveAutoReplies() {
+    std::ofstream out("autoreply.txt", std::ios::trunc);
+    if (!out) return;
+    out << "ADMAPROXY-AUTOREPLY-V1\n";
+    for (const auto& rule : autoReplies) out << rule.first << '\t' << rule.second << '\n';
+}
+
+bool PlayerState::AddAutoReply(const std::string& keyword, const std::string& reply) {
+    LoadAutoReplies();
+    if (keyword.empty() || reply.empty()) return false;
+    if (keyword.find('\t') != std::string::npos || keyword.find('\n') != std::string::npos) return false;
+    if (reply.find('\n') != std::string::npos) return false;
+    std::string needle = ToLowerStr(keyword);
+    for (auto& rule : autoReplies) {
+        if (ToLowerStr(rule.first) == needle) {
+            rule.second = reply;
+            SaveAutoReplies();
+            return true;
+        }
+    }
+    autoReplies.emplace_back(keyword, reply);
+    SaveAutoReplies();
+    return true;
+}
+
+bool PlayerState::DelAutoReply(const std::string& keyword) {
+    LoadAutoReplies();
+    std::string needle = ToLowerStr(keyword);
+    for (size_t i = 0; i < autoReplies.size(); i++) {
+        if (ToLowerStr(autoReplies[i].first) == needle) {
+            autoReplies.erase(autoReplies.begin() + i);
+            SaveAutoReplies();
+            return true;
+        }
+    }
+    return false;
+}
+
+void PlayerState::ShowAutoReplies(ENetPeer* CLIENT) {
+    LoadAutoReplies();
+    GamePacket<OnConsoleMessage> p;
+    p.text = std::string("Auto-reply is ") + (autoReply ? "ON." : "OFF.");
+    if (autoReplies.empty()) {
+        p.text += " No rules yet. Usage: /autoreply add <keyword> <reply>";
+    }
+    else {
+        for (const auto& rule : autoReplies) {
+            p.text += "\n- [" + rule.first + "] -> " + rule.second;
+        }
+    }
+    SendGamePacket(CLIENT, p);
+}
+
+void PlayerState::OnChatMessage(int netId, const std::string& text, ENetPeer* SERVER) {
+    /* @info: World chat only (talk bubbles). Whispers are not covered:
+       their packet format is not verified from the available references.
+       Guards: never reply to yourself, never reply to server
+       announcements, 30s cooldown per player plus a 2s global throttle
+       so a burst of chatters cannot spam the world. */
+    if (!autoReply) return;
+    if (netId <= 0 || netId == netID) return;
+    auto who = worldPlayers.find(netId);
+    if (who == worldPlayers.end()) return;
+    if (text.rfind("`7[", 0) == 0) return;
+    if (Packet::Contains(text, "spun the wheel")) return;
+    std::string clean = StripChatCodes(text);
+    if (clean.empty()) return;
+    LoadAutoReplies();
+    if (autoReplies.empty()) return;
+    auto now = std::chrono::steady_clock::now();
+    auto cd = replyCooldowns.find(netId);
+    if (cd != replyCooldowns.end() && now - cd->second < std::chrono::seconds(30)) return;
+    if (now - lastReplyAt < std::chrono::seconds(2)) return;
+    std::string lower = ToLowerStr(clean);
+    for (const auto& rule : autoReplies) {
+        if (lower.find(ToLowerStr(rule.first)) == std::string::npos) continue;
+        replyCooldowns[netId] = now;
+        lastReplyAt = now;
+        std::string pkt = "action|input\n|text|" + rule.second + "\n";
+        {
+            std::lock_guard<std::mutex> lock(Network.peer_mutex);
+            SendPacket(SERVER, Network.NET_MESSAGE_GENERIC_TEXT, pkt.c_str(), pkt.length());
+        }
+        LOG_INFO("Auto-reply to [{}] for keyword [{}]", who->second, rule.first);
+        return;
+    }
+}
+
+// ---------------- clothing sets ----------------
+bool PlayerState::SaveClothingSet(int slot) {
+    if (slot < 1 || slot > 4 || !clothesKnown) return false;
+    int ids[9];
+    CurrentWornIds(clothes, ids);
+    /* @info: Keep the other slots' lines, replace (or add) this one. */
+    std::vector<std::string> kept;
+    {
+        std::ifstream in("sets.txt");
+        std::string header;
+        if (in && std::getline(in, header) && header == "ADMAPROXY-SETS-V1") {
+            std::string line;
+            while (std::getline(in, line)) {
+                std::istringstream ss(line);
+                int n = 0;
+                if (ss >> n && n != slot && n >= 1 && n <= 4) kept.push_back(line);
+            }
+        }
+    }
+    std::ofstream out("sets.txt", std::ios::trunc);
+    if (!out) return false;
+    out << "ADMAPROXY-SETS-V1\n";
+    for (const auto& line : kept) out << line << '\n';
+    out << slot;
+    for (int i = 0; i < 9; i++) out << ' ' << ids[i];
+    out << '\n';
+    return true;
+}
+
+bool PlayerState::LoadClothingSet(int slot, int outIds[9]) {
+    if (slot < 1 || slot > 4) return false;
+    std::ifstream in("sets.txt");
+    if (!in) return false;
+    std::string header;
+    if (!std::getline(in, header) || header != "ADMAPROXY-SETS-V1") return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        int n = 0;
+        if (!(ss >> n) || n != slot) continue;
+        for (int i = 0; i < 9; i++) if (!(ss >> outIds[i])) return false;
+        return true;
+    }
+    return false;
+}
+
+void PlayerState::ShowClothingSets(ENetPeer* CLIENT) {
+    GamePacket<OnConsoleMessage> p;
+    p.text = "Saved clothing sets:";
+    bool any = false;
+    for (int slot = 1; slot <= 4; slot++) {
+        int ids[9];
+        if (!LoadClothingSet(slot, ids)) continue;
+        any = true;
+        p.text += "\nSet " + std::to_string(slot) + ":";
+        bool empty = true;
+        for (int i = 0; i < 9; i++) {
+            if (ids[i] <= 0) continue;
+            empty = false;
+            const Items* it = FindItemById(ids[i]);
+            p.text += " " + std::string(kClothingSlotNames[i]) + "=" + (it ? it->raw_name : std::to_string(ids[i])) + ";";
+        }
+        if (empty) p.text += " (nothing worn)";
+    }
+    if (!any) p.text = "No clothing sets saved yet. Usage: /setsave <1-4>";
+    SendGamePacket(CLIENT, p);
+}
+
+void PlayerState::ApplyClothingSet(int slot, ENetPeer* CLIENT, ENetPeer* SERVER) {
+    /* @info: Wearing is a plain item use (ITEM_ACTIVATE_REQUEST, the same
+       packet the client sends when an item is double-clicked). Items
+       already worn in their slot are skipped; an item that is neither
+       worn nor in the inventory cannot be equipped and is reported.
+       Unequipping (saved slot empty, something worn) tries activating
+       the worn item. Not verified against a live capture: needs
+       in-game testing. Runs on its own thread, like PasteWorld. */
+    int ids[9];
+    if (!LoadClothingSet(slot, ids)) {
+        GamePacket<OnConsoleMessage> p;
+        p.text = "No clothing set " + std::to_string(slot) + " saved. Usage: /setsave <1-4>";
+        SendGamePacket(CLIENT, p);
+        return;
+    }
+    if (!clothesKnown) {
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Your current clothes are not known yet. Wait for them to load and try again.";
+        SendGamePacket(CLIENT, p);
+        return;
+    }
+    int worn[9];
+    CurrentWornIds(clothes, worn);
+    int done = 0;
+    std::vector<std::string> missing;
+    for (int i = 0; i < 9; i++) {
+        if (ids[i] == worn[i]) continue;
+        int useId = ids[i] > 0 ? ids[i] : worn[i];
+        if (ids[i] > 0 && !HasItem(ids[i])) {
+            const Items* it = FindItemById(ids[i]);
+            missing.push_back(it ? it->raw_name : std::to_string(ids[i]));
+            continue;
+        }
+        if (SERVER && SERVER->state == ENET_PEER_STATE_CONNECTED) {
+            std::lock_guard<std::mutex> lock(Network.peer_mutex);
+            PlayerMovingPacket pkt;
+            pkt.PacketType(Network.PACKET_ITEM_ACTIVATE_REQUEST)
+                .NetID(netID)
+                .PlantingTree(useId)
+                .Position(position.x, position.y)
+                .Send(SERVER);
+        }
+        done++;
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    GamePacket<OnConsoleMessage> p;
+    if (done == 0 && missing.empty()) p.text = "Set " + std::to_string(slot) + " is already worn.";
+    else {
+        p.text = "Set " + std::to_string(slot) + " applied (" + std::to_string(done) + " change(s)).";
+        if (!missing.empty()) {
+            p.text += " Missing from inventory:";
+            for (const auto& name : missing) p.text += " " + name + ";";
+        }
+    }
+    SendGamePacket(CLIENT, p);
+}
+
+// ---------------- /spoof ----------------
+void PlayerState::LoadSpoofProfile() {
+    std::ifstream in("spoof.txt");
+    std::string profile;
+    if (in && std::getline(in, profile)) {
+        if (profile == "android" || profile == "ios" || profile == "pc") {
+            spoofProfile = profile;
+            Client.PLATFORM = SpoofPlatformID();
+            LOG_INFO("Spoof profile loaded: {} (platformID {})", profile, Client.PLATFORM);
+            return;
+        }
+    }
+    spoofProfile.clear();
+}
+
+void PlayerState::SaveSpoofProfile() {
+    std::ofstream out("spoof.txt", std::ios::trunc);
+    if (out) out << (spoofProfile.empty() ? "off" : spoofProfile) << "\n";
+}
+
+std::string PlayerState::SpoofPlatformID() const {
+    /* @info: OS codes from a private server's login code (best available
+       evidence, not verified against the official server): 0 = Windows,
+       1 = iOS, 4 = Android. Format is OS,version,subversion. */
+    if (spoofProfile == "android") return "4,1,1";
+    if (spoofProfile == "ios") return "1,1,1";
+    return "0,1,1";
+}
+
+bool PlayerState::ApplySpoof(std::string& loginText) {
+    /* @info: Only VALUES of existing fields are changed, never added or
+       removed, so the field-name hash (fhash) stays valid. Device
+       identity fields (mac, rid, hash, hash2, klv) are left alone: they
+       are cross-checked by hashes whose algorithm is unknown, so
+       changing them could break login or look inconsistent. */
+    if (spoofProfile.empty()) return false;
+    bool changed = false;
+    changed = Packet::Change(loginText, "platformID|", 1, "\n", SpoofPlatformID()) || changed;
+    if (spoofProfile == "android") {
+        changed = Packet::Change(loginText, "deviceVersion|", 1, "\n", "13") || changed;
+        changed = Packet::Change(loginText, "wk|", 1, "\n", "NONE0") || changed;
+        changed = Packet::Change(loginText, "zf|", 1, "\n", "") || changed;
+        changed = Packet::Change(loginText, "tr|", 1, "\n", "4322") || changed;
+    }
+    else if (spoofProfile == "ios") {
+        changed = Packet::Change(loginText, "deviceVersion|", 1, "\n", "17.0") || changed;
+        changed = Packet::Change(loginText, "wk|", 1, "\n", "NONE0") || changed;
+        changed = Packet::Change(loginText, "zf|", 1, "\n", "") || changed;
+    }
+    else if (spoofProfile == "pc") {
+        changed = Packet::Change(loginText, "deviceVersion|", 1, "\n", "0") || changed;
+    }
+    return changed;
 }

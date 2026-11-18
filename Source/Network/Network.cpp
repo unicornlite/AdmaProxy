@@ -1,5 +1,6 @@
 ﻿#include "Network.hpp"
 #include "Handler.hpp"
+#include "../Player/Player.hpp"
 #include "../Main/Config.hpp"
 #include "../Logger/Logger.hpp"
 #include "../Functions/Functions.hpp"
@@ -116,6 +117,14 @@ void NetworkManager::Injector() {
                         enet_address_get_host_ip(&client_peer->address, baseIP, sizeof(baseIP));
                         std::string ClientIP = std::string(baseIP);
 
+                        /* @info: Batch 6 - the client reconnected on its
+                           own (fresh login). Cancel any armed auto-reconnect. */
+                        if (reconnectArmed) {
+                            reconnectArmed = false;
+                            if (reconnectProbe) { enet_peer_disconnect_now(reconnectProbe, 0); reconnectProbe = nullptr; }
+                            reconnectClient = nullptr;
+                        }
+
                         LOG_INFO("Client connected to the Proxy");
                         LOG_WARN("Waiting for the Proxy to connect the Server (connects if gt servers are online)");
 
@@ -143,6 +152,15 @@ void NetworkManager::Injector() {
                     }
                     case ENET_EVENT_TYPE_DISCONNECT: {
                         std::lock_guard<std::mutex> lock(peer_mutex);
+                        /* @info: Batch 6 - the client went away while a
+                           reconnect was armed (game closed). Disarm. */
+                        if (client_peer == reconnectClient) {
+                            reconnectArmed = false;
+                            reconnectAttempts = 0;
+                            if (reconnectProbe) { enet_peer_disconnect_now(reconnectProbe, 0); reconnectProbe = nullptr; }
+                            reconnectClient = nullptr;
+                        }
+
                         auto it = client_to_server.find(client_peer);
                         if (it != client_to_server.end()) {
                             ENetPeer* server_peer = it->second;
@@ -183,6 +201,22 @@ void NetworkManager::Injector() {
 
                 switch (SERVER_EVENT.type) {
                     case ENET_EVENT_TYPE_CONNECT: {
+                        /* @info: Batch 6 - the reconnect probe reached the
+                           server. Drop the probe and ask the client to
+                           re-enter with the last session token; the
+                           normal connect flow takes over from there. */
+                        if (server_peer == reconnectProbe) {
+                            reconnectProbe = nullptr;
+                            reconnectArmed = false;
+                            enet_peer_disconnect_now(server_peer, 0);
+                            if (reconnectClient) {
+                                LOG_INFO("Server is back, asking the client to re-enter the world.");
+                                Player.SendReentryToServer(reconnectClient);
+                                reconnectClient = nullptr;
+                            }
+                            break;
+                        }
+
                         LOG_INFO("Proxy connected to the Server");
                         server_peer->pingInterval = 300;
                         enet_peer_throttle_configure(server_peer, 0, 0, 0);
@@ -191,11 +225,31 @@ void NetworkManager::Injector() {
                     }
                     case ENET_EVENT_TYPE_DISCONNECT: {
                         std::lock_guard<std::mutex> lock(peer_mutex);
+                        /* @info: Batch 6 - a reconnect probe failed to
+                           reach the server. Clear it so the next attempt
+                           can start; the timer schedules the retry. */
+                        if (server_peer == reconnectProbe) {
+                            reconnectProbe = nullptr;
+                            break;
+                        }
+
                         auto it = server_to_client.find(server_peer);
                         if (it != server_to_client.end()) {
                             ENetPeer* client_peer = it->second;
                             if (client_peer) {
-                                enet_peer_disconnect_now(client_peer, 0);
+                                /* @info: Batch 6 - auto reconnect. Keep the
+                                   client peer and retry the server instead
+                                   of dropping the client, but only when a
+                                   session token is known; without one the
+                                   client could not re-enter anyway. */
+                                if (Player.autoReconnect && Player.HasSessionToken() && !reconnectArmed) {
+                                    LOG_WARN("Server disconnected. Auto-reconnect armed, retrying up to 5 times.");
+                                    reconnectArmed = true;
+                                    reconnectAttempts = 0;
+                                    reconnectNext = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                                    reconnectClient = client_peer;
+                                }
+                                else enet_peer_disconnect_now(client_peer, 0);
                                 client_to_server.erase(client_peer);
                                 server_to_client.erase(server_peer);
                             }
@@ -225,9 +279,29 @@ void NetworkManager::Injector() {
             }
         }
 
+        /* @info: Batch 6 - auto reconnect attempts, on the network thread
+           so no ENet call races the service loop. One probe at a time;
+           a failed probe reports back as a disconnect event. */
+        if (reconnectArmed && !reconnectProbe && reconnectClient &&
+            std::chrono::steady_clock::now() >= reconnectNext) {
+            if (reconnectAttempts >= 5) {
+                LOG_WARN("Auto-reconnect gave up after 5 attempts.");
+                enet_peer_disconnect_now(reconnectClient, 0);
+                reconnectArmed = false;
+                reconnectClient = nullptr;
+            }
+            else {
+                reconnectAttempts++;
+                LOG_INFO("Reconnect attempt {}/5...", reconnectAttempts);
+                reconnectProbe = enet_host_connect(SERVER_HOST, &SERVER_ADDRESS, 2, 0);
+                reconnectNext = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                if (!reconnectProbe) LOG_ERROR("Reconnect attempt failed to start.");
+            }
+        }
+
         if (PROXY_HOST) enet_host_flush(PROXY_HOST);
         if (SERVER_HOST) enet_host_flush(SERVER_HOST);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-}
+}
