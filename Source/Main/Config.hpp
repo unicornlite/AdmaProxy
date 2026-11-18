@@ -7,7 +7,7 @@
 
 
 struct gMain {
-    std::string NAME = "Growtopia Proxy";
+    std::string NAME = "AdmaProxy";
     std::string VERSION = "1.0";
     bool BASIC_LOGS = false;
     /* @info: Teleport hotkey (virtual-key code, VK_F8 = 0x77). Hold this key
