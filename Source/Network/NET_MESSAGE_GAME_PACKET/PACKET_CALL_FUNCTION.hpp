@@ -427,6 +427,7 @@ public:
                                 bool changed = false;
                                 if (Player.country.length() == 2) changed = Packet::Change(customPacket, "country|", 1, "\n", Player.country) || changed;
                                 if (Player.unlimitedZoom) changed = Packet::Change(customPacket, "\nmstate|", 1, "\n", "1") || changed;
+                                if (!Player.customNick.empty()) changed = Packet::Change(customPacket, "\nname|", 1, "\n", Player.customNick) || changed;
                                 if (changed) {
                                 
 
@@ -522,11 +523,12 @@ public:
                                     p.ances_unknown_unknown2 = { 0.000000, 0.000000, 0.000000 };
                                 }
                                 else {
-                                    p.hair_shirt_pants = { Player.clothes.hair_shirt_pants.x, Player.clothes.hair_shirt_pants.y, Player.clothes.hair_shirt_pants.z };
-                                    p.feet_face_hand = { Player.clothes.feet_face_hand.x, Player.clothes.feet_face_hand.y, Player.clothes.feet_face_hand.z };
-                                    p.back_mask_necklace = { Player.clothes.back_mask_necklace.x, Player.clothes.back_mask_necklace.y, Player.clothes.back_mask_necklace.z };
-                                    p.skinColor = Player.clothes.skinColor;
-                                    p.ances_unknown_unknown2 = { Player.clothes.ances_unknown_unknown2.x, Player.clothes.ances_unknown_unknown2.y, Player.clothes.ances_unknown_unknown2.z };
+                                    PlayerState::Clothes c = Player.VisualClothes();
+                                    p.hair_shirt_pants = { c.hair_shirt_pants.x, c.hair_shirt_pants.y, c.hair_shirt_pants.z };
+                                    p.feet_face_hand = { c.feet_face_hand.x, c.feet_face_hand.y, c.feet_face_hand.z };
+                                    p.back_mask_necklace = { c.back_mask_necklace.x, c.back_mask_necklace.y, c.back_mask_necklace.z };
+                                    p.skinColor = c.skinColor;
+                                    p.ances_unknown_unknown2 = { c.ances_unknown_unknown2.x, c.ances_unknown_unknown2.y, c.ances_unknown_unknown2.z };
                                 }
                                 SendGamePacket(CLIENT, p, Player.netID);
                             }).detach();
@@ -562,6 +564,7 @@ public:
                             Player.clothes.back_mask_necklace = { back_mask_necklace.x, back_mask_necklace.y, back_mask_necklace.z };
                             Player.clothes.skinColor = skinColor;
                             Player.clothes.ances_unknown_unknown2 = { ances_unknown_unknown2.x, ances_unknown_unknown2.y, ances_unknown_unknown2.z };
+                            Player.clothesKnown = true;
                         }
 
                         GamePacket<OnSetClothing> p;
@@ -571,6 +574,16 @@ public:
                             p.back_mask_necklace = { 0.000000, 0.000000, 0.000000 };
                             p.skinColor = 3033464831;
                             p.ances_unknown_unknown2 = { 0.000000, 0.000000, 0.000000 };
+                        }
+                        else if (netID == Player.netID) {
+                            /* @info: Local look. The visual set overrides individual
+                               slots; the rest stays real. */
+                            PlayerState::Clothes c = Player.VisualClothes();
+                            p.hair_shirt_pants = { c.hair_shirt_pants.x, c.hair_shirt_pants.y, c.hair_shirt_pants.z };
+                            p.feet_face_hand = { c.feet_face_hand.x, c.feet_face_hand.y, c.feet_face_hand.z };
+                            p.back_mask_necklace = { c.back_mask_necklace.x, c.back_mask_necklace.y, c.back_mask_necklace.z };
+                            p.skinColor = c.skinColor;
+                            p.ances_unknown_unknown2 = { c.ances_unknown_unknown2.x, c.ances_unknown_unknown2.y, c.ances_unknown_unknown2.z };
                         }
                         else {
                             p.hair_shirt_pants = { hair_shirt_pants.x, hair_shirt_pants.y, hair_shirt_pants.z };

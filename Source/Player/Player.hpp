@@ -73,6 +73,14 @@ public:
        the remove packet does not name the collector. Guarded by
        worldMutex. */
     std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> hostCollectAttempts;
+    /* @info: Local look, client-side only. Other players still see the
+       real name and clothes: those come from the server. */
+    std::string customNick;
+    /* @info: Visual set overrides, -1 = show the real item. Slot order:
+       0 hair, 1 shirt, 2 pants, 3 feet, 4 face, 5 hand, 6 back, 7 mask,
+       8 necklace. Matches the three OnSetClothing float triples. */
+    int visualSet[9] = { -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+    bool clothesKnown = false;
     /* @info: Recent chandelier breaks, guarded by worldMutex. Gems (item
        112 drops) that appear near a break within the report window are
        summed into that break's blackjack number. */
@@ -364,6 +372,11 @@ public:
     void HostShowPot(ENetPeer* CLIENT);
     void HostPay(const std::string& playerName, ENetPeer* CLIENT, ENetPeer* SERVER);
     void HostReset();
+
+    Clothes VisualClothes() const;
+    bool HasVisualSet() const;
+    bool ResendLocalSpawn(ENetPeer* CLIENT);
+    bool ResendClothing(ENetPeer* CLIENT);
 
     void Drop(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);
     void Trash(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);

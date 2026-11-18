@@ -111,6 +111,18 @@ time. Everything is controlled from inside the game with slash commands: type
   DL. The winner must be in this world.
 - `/hostreset` - Empties the pot (after paying, or to start a new round).
 
+### Local look
+
+These change only what you see on your own screen. Other players still
+see your real name and clothes.
+
+- `/nick <text>` - Shows a custom name above your character, e.g.
+  `/nick Adma of Legend`. `/nickreset` restores your real name.
+- `/vset <slot> <itemID>` - Shows a different item in one clothing slot,
+  e.g. `/vset hair 2`. Slots: hair, shirt, pants, feet, face, hand,
+  back, mask, necklace. `/vset <slot> off` restores that slot, plain
+  `/vset` lists the current overrides, `/vsetreset` clears them all.
+
 ### Information
 
 - `/balance` - Shows your current lock balance.
@@ -260,6 +272,25 @@ time. Everything is controlled from inside the game with slash commands: type
 - **The host must be in the same world** as the players and able to
   pick up the drops. `/pay` drops the locks at the host's feet; the
   winner picks them up. The winner must be in the world when paid.
+
+## Local look notes
+
+- **Local only, by design.** The name and clothes other players see are
+  sent by the server from account data, so the proxy cannot change
+  them. `/nick` rewrites the `name` field of your own client-bound
+  OnSpawn packet, and `/vset` rewrites the clothing item IDs in your
+  own client-bound OnSetClothing packet. Nobody else sees any of it.
+- **The name in other places does not change.** The name in the screen
+  corner, in dialogs, and in chat comes from login data, not from
+  OnSpawn, so it still shows your real name.
+- **How the visual set works:** clothes arrive as three triples of
+  item IDs (hair/shirt/pants, feet/face/hand, back/mask/necklace).
+  Each `/vset` overrides one slot; the rest keep showing your real
+  clothes. The overrides re-apply on every clothing update, so they
+  survive world changes. Skin color is not covered.
+- **The nick applies on every spawn,** so it survives world changes
+  too. Turning zoom off and on keeps the nick: all spawn rewrites
+  (country, zoom, nick) go through one resend path.
 
 ## Screenshots
 

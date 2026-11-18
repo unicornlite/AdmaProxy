@@ -77,6 +77,12 @@ public:
 			p.text += "add_custom_textbox|`4/pay <player>  `o(Pays The Winner The Pot Minus Tax)|size:small|\n";
 			p.text += "add_custom_textbox|`4/hostreset  `o(Empties The Pot)|size:small|\n";
 			p.text += "add_spacer|small|\n";
+			p.text += "add_custom_textbox|`wLocal look:|size:medium|\n";
+			p.text += "add_custom_textbox|`4/nick <text>  `o(Changes Your Name On Your Screen Only)|size:small|\n";
+			p.text += "add_custom_textbox|`4/nickreset  `o(Restores Your Real Name)|size:small|\n";
+			p.text += "add_custom_textbox|`4/vset <slot> <itemID>  `o(Changes One Clothing Slot On Your Screen Only)|size:small|\n";
+			p.text += "add_custom_textbox|`4/vsetreset  `o(Restores Your Real Clothes)|size:small|\n";
+			p.text += "add_spacer|small|\n";
 			p.text += "add_custom_textbox|`wInformation:|size:medium|\n";
 			p.text += "add_custom_textbox|`4/balance  `o(Shows Your Current World Lock Balance)|size:small|\n";
 			p.text += "add_custom_textbox|`4/account  `o(Opens a Menu That Displays All Your Account Informations)|size:small|\n";
@@ -753,23 +759,12 @@ public:
 			if (Player.unlimitedZoom) {
 				text = "Unlimited zoom deactivated! Zoom is back to normal.";
 				Player.unlimitedZoom = false;
-				if (!Player.lastLocalSpawn.empty()) {
-					GamePacket<OnSpawn> p;
-					p.text = Player.lastLocalSpawn;
-					SendGamePacket(CLIENT, p);
-				}
+				Player.ResendLocalSpawn(CLIENT);
 			}
 			else {
 				text = "Unlimited zoom activated!";
 				Player.unlimitedZoom = true;
-				if (!Player.lastLocalSpawn.empty()) {
-					std::string spawn = Player.lastLocalSpawn;
-					if (Packet::Change(spawn, "\nmstate|", 1, "\n", "1")) {
-						GamePacket<OnSpawn> p;
-						p.text = spawn;
-						SendGamePacket(CLIENT, p);
-					}
-				}
+				Player.ResendLocalSpawn(CLIENT);
 			}
 
 			{
@@ -1557,6 +1552,144 @@ public:
 				GamePacket<OnTalkBubble> p;
 				p.netId = Player.netID;
 				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w Pot cleared.";
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/nick" || Packet::Contains(command, "/nick ")) {
+			std::string text;
+			if (command == "/nick") {
+				text = Player.customNick.empty() ? "No custom nick set. Usage: /nick <text>" : ("Custom nick: " + Player.customNick);
+			}
+			else {
+				std::string nick = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				Player.customNick = nick;
+				text = "Nick is now [" + nick + "] on your screen only.";
+				if (!Player.ResendLocalSpawn(CLIENT)) text += " (Applies when you join a world.)";
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/nickreset") {
+			Player.customNick.clear();
+			Player.ResendLocalSpawn(CLIENT);
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = "Nick reset to your real name.";
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w Nick reset to your real name.";
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/vset" || Packet::Contains(command, "/vset ")) {
+			static const char* slotNames[9] = { "hair", "shirt", "pants", "feet", "face", "hand", "back", "mask", "necklace" };
+			if (command == "/vset") {
+				std::string text = "Visual set:";
+				bool any = false;
+				for (int i = 0; i < 9; i++) {
+					if (Player.visualSet[i] < 0) continue;
+					any = true;
+					const Items* it = FindItemById(Player.visualSet[i]);
+					text += "\n" + std::string(slotNames[i]) + ": " + std::to_string(Player.visualSet[i]);
+					if (it) text += " (" + it->raw_name + ")";
+				}
+				if (!any) text = "No visual overrides set. Usage: /vset <slot> <itemID>";
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+			else {
+				std::string rest = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				std::string text;
+				if (rest.find(' ') == std::string::npos) {
+					text = "Usage: /vset <slot> <itemID> or /vset <slot> off";
+				}
+				else {
+					std::string slot = Packet::ExtractCustom<std::string>(rest, "", 0, " ");
+					std::string value = Packet::ExtractCustom<std::string>(rest, " ", 1, "\n");
+					auto toLower = [](std::string s) {
+						for (auto& c : s) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+						return s;
+					};
+					std::string needle = toLower(slot);
+					int idx = -1;
+					for (int i = 0; i < 9; i++) if (needle == slotNames[i]) { idx = i; break; }
+					if (idx < 0) {
+						text = "Unknown slot [" + slot + "]. Slots: hair, shirt, pants, feet, face, hand, back, mask, necklace.";
+					}
+					else if (toLower(value) == "off") {
+						Player.visualSet[idx] = -1;
+						text = std::string(slotNames[idx]) + " shows the real item again.";
+						Player.ResendClothing(CLIENT);
+					}
+					else {
+						int id = -1;
+						try { id = std::stoi(value); } catch (...) { id = -1; }
+						if (id < 0) text = "Invalid item ID. Usage: /vset <slot> <itemID>";
+						else {
+							Player.visualSet[idx] = id;
+							const Items* it = FindItemById(id);
+							text = std::string(slotNames[idx]) + " now shows " + (it ? it->raw_name : ("item " + std::to_string(id))) + " (local only).";
+							if (!Player.ResendClothing(CLIENT)) text += " (Applies when your clothes load.)";
+						}
+					}
+				}
+
+				{
+					GamePacket<OnConsoleMessage> p;
+					p.text = text;
+					SendGamePacket(CLIENT, p);
+				}
+
+				{
+					GamePacket<OnTalkBubble> p;
+					p.netId = Player.netID;
+					p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+					SendGamePacket(CLIENT, p);
+				}
+			}
+			return false;
+		}
+
+		else if (command == "/vsetreset") {
+			for (int i = 0; i < 9; i++) Player.visualSet[i] = -1;
+			Player.ResendClothing(CLIENT);
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = "Visual set cleared, showing your real clothes.";
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w Visual set cleared, showing your real clothes.";
 				SendGamePacket(CLIENT, p);
 			}
 

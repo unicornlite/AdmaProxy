@@ -3,6 +3,7 @@
 #include "../Network/Handler.hpp"
 #include "../Network/Network.hpp"
 #include "../Items/Items.hpp"
+#include "../Functions/Functions.hpp"
 #include "../Network/NET_MESSAGE_GAME_PACKET/PACKET_SEND_MAP_DATA.hpp"
 
 #include <random>
@@ -138,6 +139,9 @@ void PlayerState::Reset() {
     hostTaxPercent = 10;
     hostPot.dl = 0;
     hostPot.bgl = 0;
+    customNick.clear();
+    for (int i = 0; i < 9; i++) visualSet[i] = -1;
+    clothesKnown = false;
     hostCollectAttempts.clear();
     pathfind.running = false;
     pathfind.destX = -1;
@@ -1886,4 +1890,55 @@ void PlayerState::HostReset() {
     hostPot.dl = 0;
     hostPot.bgl = 0;
     hostCollectAttempts.clear();
+}
+
+// ---------------- Batch 5: local nick + visual set ----------------
+
+PlayerState::Clothes PlayerState::VisualClothes() const {
+    /* @info: The stored real clothes with the visual set overrides
+       applied. Slot order matches OnSetClothing: hair, shirt, pants,
+       feet, face, hand, back, mask, necklace. */
+    Clothes c = clothes;
+    float* slots[9] = { &c.hair_shirt_pants.x, &c.hair_shirt_pants.y, &c.hair_shirt_pants.z,
+        &c.feet_face_hand.x, &c.feet_face_hand.y, &c.feet_face_hand.z,
+        &c.back_mask_necklace.x, &c.back_mask_necklace.y, &c.back_mask_necklace.z };
+    for (int i = 0; i < 9; i++) if (visualSet[i] >= 0) *slots[i] = static_cast<float>(visualSet[i]);
+    return c;
+}
+
+bool PlayerState::HasVisualSet() const {
+    for (int i = 0; i < 9; i++) if (visualSet[i] >= 0) return true;
+    return false;
+}
+
+bool PlayerState::ResendLocalSpawn(ENetPeer* CLIENT) {
+    /* @info: Re-sends the stored local spawn with every current rewrite
+       applied (country, zoom, nick), or the original spawn when nothing
+       is set. One place for all of them, so turning one off never drops
+       the others. */
+    if (lastLocalSpawn.empty()) return false;
+    std::string spawn = lastLocalSpawn;
+    if (country.length() == 2) Packet::Change(spawn, "country|", 1, "\n", country);
+    if (unlimitedZoom) Packet::Change(spawn, "\nmstate|", 1, "\n", "1");
+    if (!customNick.empty()) Packet::Change(spawn, "\nname|", 1, "\n", customNick);
+    GamePacket<OnSpawn> p;
+    p.text = spawn;
+    SendGamePacket(CLIENT, p);
+    return true;
+}
+
+bool PlayerState::ResendClothing(ENetPeer* CLIENT) {
+    /* @info: Re-sends the local clothes with the visual set applied.
+       Nothing is sent before the first real OnSetClothing arrives: the
+       stored clothes would be all zeroes. */
+    if (!clothesKnown || netID <= 0) return false;
+    Clothes c = VisualClothes();
+    GamePacket<OnSetClothing> p;
+    p.hair_shirt_pants = { c.hair_shirt_pants.x, c.hair_shirt_pants.y, c.hair_shirt_pants.z };
+    p.feet_face_hand = { c.feet_face_hand.x, c.feet_face_hand.y, c.feet_face_hand.z };
+    p.back_mask_necklace = { c.back_mask_necklace.x, c.back_mask_necklace.y, c.back_mask_necklace.z };
+    p.skinColor = c.skinColor;
+    p.ances_unknown_unknown2 = { c.ances_unknown_unknown2.x, c.ances_unknown_unknown2.y, c.ances_unknown_unknown2.z };
+    SendGamePacket(CLIENT, p, netID);
+    return true;
 }
