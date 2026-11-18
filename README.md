@@ -1,6 +1,6 @@
 # AdmaProxy
 
-by unicornlite (https://github.com/unicornlite)
+by Unicornlite (https://github.com/unicornlite)
 
 Based on GrowtopiaProxy by batutekoz77.
 
@@ -206,7 +206,7 @@ All settings live in `Source/Main/Config.hpp`:
 
 ## Credits
 
-- unicornlite - author and maintainer
+- Unicornlite - author and maintainer
 - ENet - low-latency networking library
 - OpenSSL - HTTPS handling in the built-in HTTP server
 - vcpkg - dependency management
