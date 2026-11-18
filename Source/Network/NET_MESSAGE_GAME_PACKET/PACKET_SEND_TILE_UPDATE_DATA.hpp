@@ -47,11 +47,22 @@ public:
                     Player.worldTiles[idx].flag = flag;
                 }
             }
+            /* @info: The real tile took over, so an ESP marker on this tile
+               is gone. The drop/player reference maps are left alone: the
+               drop or player is still at this tile, only the visual marker
+               was replaced. */
+            uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) | static_cast<uint32_t>(y);
+            Player.espMarkers.erase(key);
         }
 
-        /* @info: Door marker, same rewrite as the map packet: open doors
-           show green, closed doors show red. */
-        if (Player.doorMark) {
+        /* @info: Client-side rewrites, same as the map packet. X-ray hides
+           every foreground block; door marker colors doors green when open,
+           red when closed. */
+        if (Player.xray) {
+            uint16_t air = 0;
+            std::memcpy(packet->data + 60, &air, sizeof(uint16_t));
+        }
+        else if (Player.doorMark) {
             int t = GetItemType(fg);
             bool isDoor = t >= 0 ? (t == type::DOOR || t == type::MAIN_DOOR) : (fg == 6 || fg == 12);
             if (isDoor) {

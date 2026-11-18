@@ -30,6 +30,7 @@ public:
                player teleports to the center of that tile. The follow-up
                STATE packet still goes through; the server only punches on
                TILE_CHANGE_REQUEST, never on STATE. */
+            float clientX = pm.X(), clientY = pm.Y();
             if (pm.PlantingTree() == 18 && pm.PunchX() >= 0 && pm.PunchY() >= 0 &&
                 (GetAsyncKeyState(Main.TELEPORT_HOTKEY) & 0x8000)) {
                 float tx = static_cast<float>(pm.PunchX() * 32 + 16);
@@ -38,9 +39,14 @@ public:
                 return false;
             }
 
-            Player.ApplyAntiGravity(packet, pm.Y());
+            Player.ApplySpeed(packet, clientX, clientY);
+            Player.ApplyAntiGravity(packet, clientY);
+            Player.ApplyNoclip(packet, clientX, clientY, pm.CharacterState());
             Player.ApplyAutoCollect(packet);
+            Player.ApplyPathfind(packet);
             Player.ApplyTeleport(packet);
+            Player.ApplyLongPunch(packet, pm.PunchX(), pm.PunchY());
+            Player.SyncSpeed(pm.X(), pm.Y());
         }
 
         if (Method == "SERVER -> PROXY -> CLIENT" && pm.NetID() == Player.netID && 

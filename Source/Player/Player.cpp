@@ -3,13 +3,59 @@
 #include "../Network/Handler.hpp"
 #include "../Network/Network.hpp"
 #include "../Items/Items.hpp"
+#include "../Network/NET_MESSAGE_GAME_PACKET/PACKET_SEND_MAP_DATA.hpp"
 
 #include <random>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <cmath>
+#include <queue>
 
 PlayerState Player;
+
+// Batch 2 item ids, verified against items.dat.
+constexpr int ITEM_WIGGLY_WORM = 2914;
+constexpr int ITEM_HAND_DRILL = 5522;
+constexpr int ITEM_DETONATOR = 5524;
+constexpr int ITEM_ICE_CRUST = 5602;
+constexpr int ITEM_URANIUM = 4658;
+
+constexpr int SURG_SPONGE = 1258;
+constexpr int SURG_SCALPEL = 1260;
+constexpr int SURG_ANESTHETIC = 1262;
+constexpr int SURG_ANTISEPTIC = 1264;
+constexpr int SURG_ANTIBIOTICS = 1266;
+constexpr int SURG_SPLINT = 1268;
+constexpr int SURG_STITCHES = 1270;
+constexpr int SURG_GLOVES = 1296;
+constexpr int SURG_PINS = 4308;
+constexpr int SURG_TRANSFUSION = 4310;
+constexpr int SURG_DEFIB = 4312;
+constexpr int SURG_ULTRASOUND = 4316;
+constexpr int SURG_LABKIT = 4318;
+
+// ESP marker blocks: Yellow Block for drops, Aqua Block for players.
+constexpr uint16_t ESP_DROP_BLOCK = 174;
+constexpr uint16_t ESP_PLAYER_BLOCK = 178;
+
+// Water flag bit in the tile flags (GTProxy TileFlag::Water).
+constexpr uint16_t TILE_FLAG_WATER = 1 << 10;
+
+// Long punch reach in tiles, measured from the player.
+constexpr int LONG_PUNCH_REACH = 10;
+
+// Noclip nudge per outgoing STATE packet while pushing against a wall.
+constexpr float NOCLIP_STEP = 8.0f;
+
+inline uint64_t EspKey(int x, int y) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) | static_cast<uint32_t>(y);
+}
+
+inline std::string EspDirection(float dx, float dy) {
+    if (std::abs(dx) >= std::abs(dy)) return dx >= 0.0f ? "right" : "left";
+    return dy >= 0.0f ? "below" : "above";
+}
 
 
 void PlayerState::Reset() {
@@ -60,6 +106,23 @@ void PlayerState::Reset() {
     teleport.hasSaved = false;
 
     paste.running = false;
+
+    autoSurgery = false;
+    surgFindFix = false;
+    autoFish = false;
+    fishing.generation++;
+    speedEnabled = false;
+    speedFactor = 1.5f;
+    speed.synced = false;
+    longPunch = false;
+    noclip = false;
+    noclipState.synced = false;
+    esp = false;
+    xray = false;
+    spinInfo = false;
+    pathfind.running = false;
+    pathfind.destX = -1;
+    pathfind.destY = -1;
 
     position.x = 0.0f;
     position.y = 0.0f;
@@ -480,6 +543,17 @@ void PlayerState::ClearWorld() {
     worldDrops.clear();
     playerPositions.clear();
     lastMapPacket.clear();
+    pathfind.running = false;
+    pathfind.destX = -1;
+    pathfind.destY = -1;
+    pathfind.targetX = 0.0f;
+    pathfind.targetY = 0.0f;
+    pathfind.targetUntil = {};
+    espMarkers.clear();
+    espDropTiles.clear();
+    espPlayerTiles.clear();
+    speed.synced = false;
+    noclipState.synced = false;
     autocollect.targetX = 0.0f;
     autocollect.targetY = 0.0f;
     autocollect.targetUntil = {};
@@ -813,4 +887,730 @@ bool PlayerState::ResendMapData(ENetPeer* CLIENT) {
         enet_peer_send(CLIENT, 0, p);
     }
     return true;
+}
+
+// ---------------- Batch 2: movement overrides ----------------
+
+void PlayerState::ApplySpeed(ENetPacket* packet, float clientX, float clientY) {
+    /* @info: Speed. Scales the client's movement delta by speedFactor and
+       adds it to the last sent position, so the server sees the player walk
+       faster. A sudden huge jump is a resync (warp, teleport echo), not
+       walking, so it re-syncs instead of scaling. The final sent position
+       is re-synced by SyncSpeed after the other overrides run. */
+    if (!speedEnabled || !packet || packet->dataLength < 44) return;
+    if (!speed.synced) {
+        speed.prevClientX = clientX;
+        speed.prevClientY = clientY;
+        speed.prevSentX = clientX;
+        speed.prevSentY = clientY;
+        speed.synced = true;
+        return;
+    }
+    float dx = clientX - speed.prevClientX;
+    float dy = clientY - speed.prevClientY;
+    if (std::abs(dx) > 200.0f || std::abs(dy) > 200.0f) {
+        speed.prevClientX = clientX;
+        speed.prevClientY = clientY;
+        speed.prevSentX = clientX;
+        speed.prevSentY = clientY;
+        return;
+    }
+    float newX = speed.prevSentX + dx * speedFactor;
+    float newY = speed.prevSentY + dy * speedFactor;
+    std::memcpy(packet->data + 4 + 0x18, &newX, sizeof(float));
+    std::memcpy(packet->data + 4 + 0x1C, &newY, sizeof(float));
+    speed.prevClientX = clientX;
+    speed.prevClientY = clientY;
+    speed.prevSentX = newX;
+    speed.prevSentY = newY;
+}
+
+void PlayerState::SyncSpeed(float sentX, float sentY) {
+    /* @info: Called after every other override, with the packet's final
+       position. Keeps the speed baseline honest when a teleport, collect
+       or pathfind step replaced the position this packet. */
+    if (!speedEnabled) return;
+    speed.prevSentX = sentX;
+    speed.prevSentY = sentY;
+}
+
+void PlayerState::ApplyNoclip(ENetPacket* packet, float clientX, float clientY, int characterState) {
+    /* @info: Noclip. Movement intent comes from the character state flags
+       (32 = moving, 16 = facing left, 128 = jumping; see the debug notes in
+       PACKET_STATE). While the player moves freely the override tracks the
+       client position; while the player pushes against a wall (intent set,
+       position not changing) the override position is nudged through it,
+       and the server echoes the new position back to the client. One quirk:
+       at the apex of a jump the Y speed briefly reads as zero while the
+       jumping flag is still set, so jumps can go slightly higher. */
+    if (!noclip || !packet || packet->dataLength < 44) return;
+    if (!noclipState.synced) {
+        noclipState.x = clientX;
+        noclipState.y = clientY;
+        noclipState.lastClientX = clientX;
+        noclipState.lastClientY = clientY;
+        noclipState.synced = true;
+        return;
+    }
+    bool moving = (characterState & 32) != 0;
+    bool jumping = (characterState & 128) != 0;
+    float dx = clientX - noclipState.lastClientX;
+    float dy = clientY - noclipState.lastClientY;
+    if (moving && std::abs(dx) < 0.5f) {
+        float dir = (characterState & 16) ? -1.0f : 1.0f;
+        noclipState.x += dir * NOCLIP_STEP;
+    }
+    else {
+        noclipState.x = clientX;
+    }
+    if (jumping && std::abs(dy) < 0.5f) {
+        noclipState.y -= NOCLIP_STEP;
+    }
+    else {
+        noclipState.y = clientY;
+    }
+    noclipState.lastClientX = clientX;
+    noclipState.lastClientY = clientY;
+    std::memcpy(packet->data + 4 + 0x18, &noclipState.x, sizeof(float));
+    std::memcpy(packet->data + 4 + 0x1C, &noclipState.y, sizeof(float));
+}
+
+void PlayerState::ApplyPathfind(ENetPacket* packet) {
+    /* @info: Pathfind. Same window pattern as auto-collect: while the
+       worker's step window is open, outgoing packets carry the step's
+       position instead of the real one. Runs after auto-collect, so a path
+       step wins over a collect target while both are active. */
+    if (!pathfind.running || !packet || packet->dataLength < 44) return;
+    std::lock_guard<std::mutex> lock(worldMutex);
+    if (std::chrono::steady_clock::now() >= pathfind.targetUntil) return;
+    std::memcpy(packet->data + 4 + 0x18, &pathfind.targetX, sizeof(float));
+    std::memcpy(packet->data + 4 + 0x1C, &pathfind.targetY, sizeof(float));
+    float zero = 0.0f;
+    std::memcpy(packet->data + 4 + 0x24, &zero, sizeof(float));
+}
+
+void PlayerState::ApplyLongPunch(ENetPacket* packet, int punchX, int punchY) {
+    /* @info: Long punch. Extends the punch coordinates to LONG_PUNCH_REACH
+       tiles out from the player, in the same direction, so far blocks can
+       be punched (and far tiles placed on). Whether the server accepts a
+       punch that far away is NOT verified: Gurotopia does no distance
+       check, the real server might. Needs in-game testing. */
+    if (!longPunch || !packet || packet->dataLength < 56) return;
+    if (punchX < 0 || punchY < 0) return;
+    if (position.x <= 0.0f || position.y <= 0.0f) return;
+    int px = static_cast<int>(position.x) / 32;
+    int py = static_cast<int>(position.y) / 32;
+    int dx = punchX - px, dy = punchY - py;
+    int len = std::max(std::abs(dx), std::abs(dy));
+    if (len == 0) return;
+    int nx = px + dx * LONG_PUNCH_REACH / len;
+    int ny = py + dy * LONG_PUNCH_REACH / len;
+    if (nx < 0) nx = 0;
+    if (ny < 0) ny = 0;
+    std::memcpy(packet->data + 4 + 0x2C, &nx, sizeof(int));
+    std::memcpy(packet->data + 4 + 0x30, &ny, sizeof(int));
+}
+
+// ---------------- Batch 2: surgery ----------------
+
+void PlayerState::AutoSurgeryStep(const std::string& dialog, ENetPeer* CLIENT, ENetPeer* SERVER) {
+    /* @info: Auto surgery. Surgery runs through dialogs: the server sends an
+       OnDialogRequest with the patient status, the client answers with a
+       dialog_return naming the tool button. The symptom-to-tool rules below
+       come from a field-used auto-surgery implementation (CyrusSE
+       Growtopia-Internal-Cheat, written for a private server) and match the
+       official surgery guide's dialog flow, but they are NOT verified
+       against a live capture from the official server. One deliberate
+       deviation from that reference: the fix tools (gloves, pins, splint)
+       only run when a fixable condition was actually detected, instead of
+       firing whenever the player happens to own them. A tool button that is
+       missing from the dialog means the player does not own the tool, so
+       the proxy stops instead of spamming a dead button. */
+    if (!autoSurgery) return;
+
+    auto sendTool = [&](int toolId, const char* log) -> bool {
+        std::string btn = "tool" + std::to_string(toolId);
+        if (dialog.find(btn) == std::string::npos) {
+            autoSurgery = false;
+            GamePacket<OnConsoleMessage> p;
+            p.text = "Auto surgery stopped: missing tool " + std::to_string(toolId) + ".";
+            SendGamePacket(CLIENT, p);
+            return false;
+        }
+        std::string pkt = "action|dialog_return\ndialog_name|surgery\nbuttonClicked|" + btn + "\n";
+        {
+            std::lock_guard<std::mutex> lock(Network.peer_mutex);
+            SendPacket(SERVER, Network.NET_MESSAGE_GENERIC_TEXT, pkt.c_str(), static_cast<int>(pkt.length()));
+        }
+        LOG_INFO("Auto surgery: {}", log);
+        return true;
+    };
+
+    // Surgery dialog opened: start the surgery.
+    if (dialog.find("Surgeon Skill") != std::string::npos) {
+        std::string pkt = "action|dialog_return\ndialog_name|surge\n";
+        {
+            std::lock_guard<std::mutex> lock(Network.peer_mutex);
+            SendPacket(SERVER, Network.NET_MESSAGE_GENERIC_TEXT, pkt.c_str(), static_cast<int>(pkt.length()));
+        }
+        surgFindFix = false;
+        return;
+    }
+
+    if (dialog.find("Operation site") == std::string::npos) return;
+
+    // Conditions that need a fix step later.
+    if (dialog.find("You've exposed the brain.") != std::string::npos ||
+        dialog.find("Patient suffered massive trauma with internal bleeding") != std::string::npos ||
+        dialog.find("Patient suffered fatty liver.") != std::string::npos ||
+        dialog.find("Patient suffered chaos infection") != std::string::npos) {
+        surgFindFix = true;
+    }
+
+    size_t failPos = dialog.find("Skill Fail");
+    if (failPos != std::string::npos && failPos + 10 < dialog.size()) {
+        std::string skill = dialog.substr(failPos + 10);
+        size_t end = skill.find("```3]");
+        if (end != std::string::npos) skill = skill.substr(0, end);
+        LOG_INFO("Auto surgery: skill failed ({})", skill);
+    }
+
+    // Ordered symptom -> tool rules. First match wins, one tool per dialog.
+    if (dialog.find("`4You can't") != std::string::npos) { sendTool(SURG_SPONGE, "Used sponge"); return; }
+    if (dialog.find("`4Heart") != std::string::npos) { sendTool(SURG_DEFIB, "Heart was stopped"); return; }
+    if (dialog.find("Patient's fever is `4climbing `4fast!") != std::string::npos ||
+        dialog.find("Patient's fever is `6climbing!") != std::string::npos ||
+        dialog.find("Temp: `4") != std::string::npos ||
+        dialog.find("Temp: `6") != std::string::npos ||
+        dialog.find("Temp: `3") != std::string::npos) {
+        if (dialog.find("tool4318") != std::string::npos) sendTool(SURG_LABKIT, "Used lab kit");
+        else sendTool(SURG_ANTIBIOTICS, "Used antibiotics");
+        return;
+    }
+    if (dialog.find("Patient is losing blood") != std::string::npos) { sendTool(SURG_STITCHES, "Stitching"); return; }
+    if (dialog.find("`4Extremely Weak") != std::string::npos ||
+        dialog.find("Pulse: `6Weak") != std::string::npos) {
+        sendTool(SURG_TRANSFUSION, "Transfusion");
+        return;
+    }
+    if (dialog.find("`4Awake") != std::string::npos ||
+        dialog.find("`3Awake") != std::string::npos ||
+        dialog.find("`6Coming to") != std::string::npos) {
+        sendTool(SURG_ANESTHETIC, "Anesthetic");
+        return;
+    }
+    if (dialog.find("`4Unsanitary") != std::string::npos ||
+        dialog.find("`3Not `3sanitized") != std::string::npos ||
+        dialog.find("`6Unclean") != std::string::npos) {
+        sendTool(SURG_ANTISEPTIC, "Antiseptic");
+        return;
+    }
+    if (dialog.find("not been diagnosed") != std::string::npos) {
+        if (sendTool(SURG_ULTRASOUND, "Ultrasound")) surgFindFix = true;
+        return;
+    }
+    if (dialog.find("Patient wants a nose job") != std::string::npos ||
+        dialog.find("shattered") != std::string::npos) {
+        if (sendTool(SURG_SCALPEL, "Scalpel")) surgFindFix = true;
+        return;
+    }
+    if (dialog.find("You pickup it.") != std::string::npos) {
+        sendTool(SURG_STITCHES, "Closing up");
+        surgFindFix = false;
+        return;
+    }
+
+    // No symptom matched: fix the found condition, or keep looking for it.
+    if (surgFindFix) {
+        if (dialog.find("tool1296") != std::string::npos) {
+            if (sendTool(SURG_GLOVES, "Fixing with gloves")) surgFindFix = false;
+            return;
+        }
+        if (dialog.find("tool4308") != std::string::npos) { sendTool(SURG_PINS, "Pins"); return; }
+        if (dialog.find("tool1268") != std::string::npos) { sendTool(SURG_SPLINT, "Splint"); return; }
+        if (dialog.find("tool1260") != std::string::npos) { sendTool(SURG_SCALPEL, "Looking for the fix"); return; }
+        autoSurgery = false;
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Auto surgery stopped: no fix tool (gloves, pins, splint, scalpel).";
+        SendGamePacket(CLIENT, p);
+        return;
+    }
+}
+
+// ---------------- Batch 2: fishing ----------------
+
+bool PlayerState::FindWaterTile(int& outX, int& outY) {
+    if (position.x <= 0.0f || position.y <= 0.0f) return false;
+    int px = static_cast<int>(position.x) / 32;
+    int py = static_cast<int>(position.y) / 32;
+    static const int cand[8][2] = { {-1, 1}, {1, 1}, {-1, 0}, {1, 0}, {0, 1}, {-1, -1}, {1, -1}, {0, -1} };
+    std::lock_guard<std::mutex> lock(worldMutex);
+    if (worldWidth <= 0 || worldHeight <= 0) return false;
+    for (auto& c : cand) {
+        int x = px + c[0], y = py + c[1];
+        if (x < 0 || y < 0 || x >= worldWidth || y >= worldHeight) continue;
+        if (worldTiles[static_cast<size_t>(y) * static_cast<size_t>(worldWidth) + static_cast<size_t>(x)].flag & TILE_FLAG_WATER) {
+            outX = x;
+            outY = y;
+            return true;
+        }
+    }
+    return false;
+}
+
+void PlayerState::CastFishing(ENetPeer* CLIENT, ENetPeer* SERVER) {
+    /* @info: One cast. Runs in a worker thread because the drill/detonate
+       step sleeps; the casting flag keeps a splash and a catch message
+       right after each other from firing two casts. The cast itself is a
+       plain item use (Place with the bait id), which is also how the reel
+       works: the splash happens at the bait tile, so casting again reels
+       the fish in. */
+    if (!autoFish) return;
+    bool expected = false;
+    if (!fishing.casting.compare_exchange_strong(expected, true)) return;
+
+    std::thread([this, CLIENT, SERVER]() {
+        // Drill or detonate first when the water is covered. The packet
+        // form is a plain item use, like every other item; it is NOT
+        // verified against a capture, so this needs in-game testing.
+        if (autoFish) {
+            int px = static_cast<int>(position.x) / 32;
+            int py = static_cast<int>(position.y) / 32;
+            int tool = 0, toolX = -1, toolY = -1;
+            {
+                std::lock_guard<std::mutex> lock(worldMutex);
+                static const int cand[8][2] = { {-1, 1}, {1, 1}, {-1, 0}, {1, 0}, {0, 1}, {-1, -1}, {1, -1}, {0, -1} };
+                for (auto& c : cand) {
+                    int x = px + c[0], y = py + c[1];
+                    if (x < 0 || y < 0 || x >= worldWidth || y >= worldHeight) continue;
+                    uint16_t fg = worldTiles[static_cast<size_t>(y) * static_cast<size_t>(worldWidth) + static_cast<size_t>(x)].fg;
+                    if (fg == ITEM_ICE_CRUST && HasItem(ITEM_HAND_DRILL)) { tool = ITEM_HAND_DRILL; toolX = x; toolY = y; break; }
+                    if (fg == ITEM_URANIUM && HasItem(ITEM_DETONATOR)) { tool = ITEM_DETONATOR; toolX = x; toolY = y; break; }
+                }
+            }
+            if (tool != 0) {
+                Place(tool, position.x, position.y, toolX, toolY, SERVER);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+        }
+
+        if (!autoFish) { fishing.casting = false; return; }
+
+        if (!HasItem(ITEM_WIGGLY_WORM)) {
+            autoFish = false;
+            GamePacket<OnConsoleMessage> p;
+            p.text = "Auto fishing stopped: out of Wiggly Worms.";
+            SendGamePacket(CLIENT, p);
+            fishing.casting = false;
+            return;
+        }
+
+        int wx = -1, wy = -1;
+        if (!FindWaterTile(wx, wy)) {
+            autoFish = false;
+            GamePacket<OnConsoleMessage> p;
+            p.text = "Auto fishing stopped: no water next to you.";
+            SendGamePacket(CLIENT, p);
+            fishing.casting = false;
+            return;
+        }
+
+        Place(ITEM_WIGGLY_WORM, position.x, position.y, wx, wy, SERVER);
+        fishing.casting = false;
+    }).detach();
+}
+
+void PlayerState::ScheduleFishingRecast(ENetPeer* CLIENT, ENetPeer* SERVER) {
+    /* @info: After a catch (or an empty line) the next cast goes out after
+       a short pause. The generation check kills recasts scheduled before
+       the last /fish toggle. */
+    int gen = fishing.generation.load();
+    std::thread([this, CLIENT, SERVER, gen]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        if (!autoFish || fishing.generation.load() != gen) return;
+        CastFishing(CLIENT, SERVER);
+    }).detach();
+}
+
+// ---------------- Batch 2: pathfind ----------------
+
+bool PlayerState::FindPath(int fromX, int fromY, int toX, int toY, std::vector<std::pair<int, int>>& out) {
+    /* @info: A* over the parsed tile map. A tile is walkable when it has no
+       foreground block, or its block has NO_COLLISION or ON_TOP (platform)
+       in items.dat; unknown items count as solid. If the goal tile itself
+       is solid, the nearest walkable neighbour is used instead. The path
+       is a plain 4-direction grid path: it may climb through open air,
+       because the proxy moves the player along it with position overrides
+       rather than simulating jumps. */
+    out.clear();
+    int w = 0, h = 0;
+    std::vector<WorldTile> tiles;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        if (worldWidth <= 0 || worldHeight <= 0) return false;
+        w = worldWidth;
+        h = worldHeight;
+        tiles = worldTiles;
+    }
+    if (fromX < 0 || fromY < 0 || toX < 0 || toY < 0 || fromX >= w || fromY >= h || toX >= w || toY >= h) return false;
+
+    auto walkable = [&](int x, int y) -> bool {
+        if (x < 0 || y < 0 || x >= w || y >= h) return false;
+        uint16_t fg = tiles[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)].fg;
+        if (fg == 0) return true;
+        int c = GetItemCollision(fg);
+        if (c < 0) return false;
+        return c == collision::NO_COLLISION || c == collision::ON_TOP;
+    };
+
+    if (!walkable(toX, toY)) {
+        const int nb[4][2] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
+        bool found = false;
+        for (auto& d : nb) {
+            if (walkable(toX + d[0], toY + d[1])) { toX += d[0]; toY += d[1]; found = true; break; }
+        }
+        if (!found) return false;
+    }
+
+    auto idx = [&](int x, int y) { return y * w + x; };
+    auto heur = [&](int x, int y) { return std::abs(x - toX) + std::abs(y - toY); };
+
+    struct Node { int f, g, x, y; };
+    struct Cmp {
+        bool operator()(const Node& a, const Node& b) const { return a.f > b.f; }
+    };
+    std::priority_queue<Node, std::vector<Node>, Cmp> open;
+    std::unordered_map<int, int> gScore, cameFrom;
+    std::unordered_map<int, bool> closed;
+
+    open.push({ heur(fromX, fromY), 0, fromX, fromY });
+    gScore[idx(fromX, fromY)] = 0;
+    int expanded = 0;
+    const int dirs[4][2] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
+
+    while (!open.empty()) {
+        Node cur = open.top();
+        open.pop();
+        int ci = idx(cur.x, cur.y);
+        if (closed[ci]) continue;
+        closed[ci] = true;
+        if (++expanded > 200000) return false;
+
+        if (cur.x == toX && cur.y == toY) {
+            std::vector<std::pair<int, int>> path;
+            int at = ci;
+            while (at != idx(fromX, fromY)) {
+                path.emplace_back(at % w, at / w);
+                auto it = cameFrom.find(at);
+                if (it == cameFrom.end()) return false;
+                at = it->second;
+            }
+            path.emplace_back(fromX, fromY);
+            std::reverse(path.begin(), path.end());
+            out = std::move(path);
+            return true;
+        }
+
+        for (auto& d : dirs) {
+            int nx = cur.x + d[0], ny = cur.y + d[1];
+            if (!walkable(nx, ny)) continue;
+            int ni = idx(nx, ny);
+            if (closed[ni]) continue;
+            int ng = cur.g + 1;
+            auto it = gScore.find(ni);
+            if (it == gScore.end() || ng < it->second) {
+                gScore[ni] = ng;
+                cameFrom[ni] = ci;
+                open.push({ ng + heur(nx, ny), ng, nx, ny });
+            }
+        }
+    }
+    return false;
+}
+
+void PlayerState::PathfindLoop(ENetPeer* CLIENT, ENetPeer* SERVER) {
+    (void)SERVER;
+    int tx = -1, ty = -1;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        tx = pathfind.destX;
+        ty = pathfind.destY;
+    }
+    int fromX = static_cast<int>(position.x) / 32;
+    int fromY = static_cast<int>(position.y) / 32;
+    std::vector<std::pair<int, int>> path;
+    if (!FindPath(fromX, fromY, tx, ty, path) || path.size() < 2) {
+        GamePacket<OnConsoleMessage> p;
+        p.text = path.size() == 1 ? "Already there." : "No path to that tile.";
+        SendGamePacket(CLIENT, p);
+        pathfind.running = false;
+        return;
+    }
+    // One tile per 200ms, about walking speed. The override window outlives
+    // the sleep so the position stays overridden between steps.
+    for (size_t i = 1; i < path.size(); i++) {
+        if (!pathfind.running) return;
+        float wx = static_cast<float>(path[i].first * 32 + 16);
+        float wy = static_cast<float>(path[i].second * 32 + 16);
+        {
+            std::lock_guard<std::mutex> lock(worldMutex);
+            pathfind.targetX = wx;
+            pathfind.targetY = wy;
+            pathfind.targetUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    if (!pathfind.running) return;
+    {
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Arrived.";
+        SendGamePacket(CLIENT, p);
+    }
+    pathfind.running = false;
+}
+
+void PlayerState::StopPathfind() {
+    pathfind.running = false;
+    std::lock_guard<std::mutex> lock(worldMutex);
+    pathfind.targetUntil = {};
+    pathfind.destX = -1;
+    pathfind.destY = -1;
+}
+
+// ---------------- Batch 2: ESP + map view ----------------
+
+void PlayerState::SendTileUpdate(ENetPeer* CLIENT, int x, int y, uint16_t fg, uint16_t bg, uint16_t flag) {
+    /* @info: Forged single-tile update to the client: 4-byte message type,
+       56-byte tank packet (type 5, punch = tile, extra size 8, extra-data
+       flag bit set), then one serialized tile (fg, bg, parent, flag).
+       Built by hand because PlayerMovingPacket::Send zeroes the extra
+       region instead of filling it. */
+    if (!CLIENT || CLIENT->state != ENET_PEER_STATE_CONNECTED) return;
+    uint8_t buf[4 + 56 + 8] = {};
+    int msgType = Network.NET_MESSAGE_GAME_PACKET;
+    std::memcpy(buf + 0, &msgType, 4);
+    int pktType = Network.PACKET_SEND_TILE_UPDATE_DATA;
+    std::memcpy(buf + 4 + 0x00, &pktType, 4);
+    std::memcpy(buf + 4 + 0x04, &netID, 4);
+    int flags = 8;
+    std::memcpy(buf + 4 + 0x0C, &flags, 4);
+    std::memcpy(buf + 4 + 0x2C, &x, 4);
+    std::memcpy(buf + 4 + 0x30, &y, 4);
+    int extraSize = 8;
+    std::memcpy(buf + 4 + 0x34, &extraSize, 4);
+    uint16_t parent = 0;
+    std::memcpy(buf + 60 + 0, &fg, 2);
+    std::memcpy(buf + 60 + 2, &bg, 2);
+    std::memcpy(buf + 60 + 4, &parent, 2);
+    std::memcpy(buf + 60 + 6, &flag, 2);
+    ENetPacket* p = enet_packet_create(buf, sizeof(buf), ENET_PACKET_FLAG_RELIABLE);
+    if (!p) return;
+    {
+        std::lock_guard<std::mutex> lock(Network.peer_mutex);
+        enet_peer_send(CLIENT, 0, p);
+    }
+}
+
+bool PlayerState::EspMarkTile(ENetPeer* CLIENT, int x, int y, uint16_t blockId) {
+    if (x < 0 || y < 0) return false;
+    uint64_t key = EspKey(x, y);
+    uint16_t bg = 0, flag = 0;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        if (espMarkers.find(key) != espMarkers.end()) return true;
+        if (worldWidth <= 0 || x >= worldWidth || y >= worldHeight) return false;
+        const auto& t = worldTiles[static_cast<size_t>(y) * static_cast<size_t>(worldWidth) + static_cast<size_t>(x)];
+        if (t.fg != 0) return false;
+        bg = t.bg;
+        flag = t.flag;
+        espMarkers[key] = t.fg;
+    }
+    SendTileUpdate(CLIENT, x, y, blockId, bg, flag);
+    return true;
+}
+
+void PlayerState::EspUnmarkKey(ENetPeer* CLIENT, uint64_t key) {
+    int x = static_cast<int>(key >> 32);
+    int y = static_cast<int>(key & 0xFFFFFFFFu);
+    uint16_t fg = 0, bg = 0, flag = 0;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        auto it = espMarkers.find(key);
+        if (it == espMarkers.end()) return;
+        fg = it->second;
+        espMarkers.erase(it);
+        if (worldWidth > 0 && x < worldWidth && y < worldHeight) {
+            const auto& t = worldTiles[static_cast<size_t>(y) * static_cast<size_t>(worldWidth) + static_cast<size_t>(x)];
+            bg = t.bg;
+            flag = t.flag;
+        }
+    }
+    SendTileUpdate(CLIENT, x, y, fg, bg, flag);
+}
+
+void PlayerState::EspReleaseKey(ENetPeer* CLIENT, uint64_t key) {
+    bool restore = false;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        for (const auto& kv : espDropTiles) if (kv.second == key) return;
+        for (const auto& kv : espPlayerTiles) if (kv.second == key) return;
+        if (espMarkers.find(key) == espMarkers.end()) return;
+        restore = true;
+    }
+    if (restore) EspUnmarkKey(CLIENT, key);
+}
+
+void PlayerState::EspMarkDrop(ENetPeer* CLIENT, const WorldDrop& drop) {
+    int x = static_cast<int>(drop.x) / 32;
+    int y = static_cast<int>(drop.y) / 32;
+    if (EspMarkTile(CLIENT, x, y, ESP_DROP_BLOCK)) {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        espDropTiles[drop.uid] = EspKey(x, y);
+    }
+}
+
+void PlayerState::EspUnmarkDrop(ENetPeer* CLIENT, uint32_t uid) {
+    uint64_t key = 0;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        auto it = espDropTiles.find(uid);
+        if (it == espDropTiles.end()) return;
+        key = it->second;
+        espDropTiles.erase(it);
+    }
+    EspReleaseKey(CLIENT, key);
+}
+
+void PlayerState::EspMarkPlayer(ENetPeer* CLIENT, int netId, float x, float y) {
+    int tx = static_cast<int>(x) / 32;
+    int ty = static_cast<int>(y) / 32;
+    uint64_t key = EspKey(tx, ty);
+    uint64_t oldKey = 0;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        auto it = espPlayerTiles.find(netId);
+        if (it != espPlayerTiles.end() && it->second == key) return;
+        if (it != espPlayerTiles.end()) oldKey = it->second;
+        espPlayerTiles[netId] = key;
+    }
+    if (oldKey != 0 && oldKey != key) EspReleaseKey(CLIENT, oldKey);
+    EspMarkTile(CLIENT, tx, ty, ESP_PLAYER_BLOCK);
+}
+
+void PlayerState::EspUnmarkPlayer(ENetPeer* CLIENT, int netId) {
+    uint64_t key = 0;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        auto it = espPlayerTiles.find(netId);
+        if (it == espPlayerTiles.end()) return;
+        key = it->second;
+        espPlayerTiles.erase(it);
+    }
+    EspReleaseKey(CLIENT, key);
+}
+
+void PlayerState::RefreshEspMarkers(ENetPeer* CLIENT) {
+    ClearEspMarkers(CLIENT);
+    std::vector<WorldDrop> drops;
+    std::vector<std::pair<int, Position>> players;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        drops = worldDrops;
+        for (const auto& kv : playerPositions) players.emplace_back(kv.first, kv.second);
+    }
+    for (const auto& d : drops) EspMarkDrop(CLIENT, d);
+    for (const auto& p : players) EspMarkPlayer(CLIENT, p.first, p.second.x, p.second.y);
+}
+
+void PlayerState::ClearEspMarkers(ENetPeer* CLIENT) {
+    std::vector<uint64_t> keys;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        for (const auto& kv : espMarkers) keys.push_back(kv.first);
+        espMarkers.clear();
+        espDropTiles.clear();
+        espPlayerTiles.clear();
+    }
+    for (uint64_t key : keys) {
+        int x = static_cast<int>(key >> 32);
+        int y = static_cast<int>(key & 0xFFFFFFFFu);
+        uint16_t bg = 0, flag = 0;
+        {
+            std::lock_guard<std::mutex> lock(worldMutex);
+            if (worldWidth > 0 && x < worldWidth && y < worldHeight) {
+                const auto& t = worldTiles[static_cast<size_t>(y) * static_cast<size_t>(worldWidth) + static_cast<size_t>(x)];
+                bg = t.bg;
+                flag = t.flag;
+            }
+        }
+        SendTileUpdate(CLIENT, x, y, 0, bg, flag);
+    }
+}
+
+void PlayerState::EspListItems(ENetPeer* CLIENT) {
+    struct Entry { std::string name; int amount; float dist; std::string dir; };
+    std::vector<Entry> entries;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        for (const auto& d : worldDrops) {
+            const Items* it = FindItemById(d.itemId);
+            std::string name = it ? it->raw_name : ("item " + std::to_string(d.itemId));
+            float dx = d.x - position.x, dy = d.y - position.y;
+            float dist = std::sqrt(dx * dx + dy * dy) / 32.0f;
+            entries.push_back({ name, d.amount, dist, EspDirection(dx, dy) });
+        }
+    }
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.dist < b.dist; });
+    std::string text = entries.empty() ? "No drops in this world." : "Drops in this world:";
+    size_t shown = 0;
+    for (const auto& e : entries) {
+        if (shown >= 15) break;
+        text += "\n" + e.name + " x" + std::to_string(e.amount) + " - " +
+            std::to_string(static_cast<int>(e.dist + 0.5f)) + " tiles " + e.dir;
+        shown++;
+    }
+    if (entries.size() > shown) text += "\n... and " + std::to_string(entries.size() - shown) + " more.";
+    GamePacket<OnConsoleMessage> p;
+    p.text = text;
+    SendGamePacket(CLIENT, p);
+}
+
+void PlayerState::EspListPlayers(ENetPeer* CLIENT) {
+    struct Entry { std::string name; float dist; std::string dir; };
+    std::vector<Entry> entries;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        for (const auto& kv : worldPlayers) {
+            auto it = playerPositions.find(kv.first);
+            if (it == playerPositions.end()) continue;
+            float dx = it->second.x - position.x, dy = it->second.y - position.y;
+            float dist = std::sqrt(dx * dx + dy * dy) / 32.0f;
+            entries.push_back({ kv.second, dist, EspDirection(dx, dy) });
+        }
+    }
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.dist < b.dist; });
+    std::string text = entries.empty() ? "No other players with a known position." : "Players in this world:";
+    size_t shown = 0;
+    for (const auto& e : entries) {
+        if (shown >= 15) break;
+        text += "\n" + e.name + " - " + std::to_string(static_cast<int>(e.dist + 0.5f)) + " tiles " + e.dir;
+        shown++;
+    }
+    if (entries.size() > shown) text += "\n... and " + std::to_string(entries.size() - shown) + " more.";
+    GamePacket<OnConsoleMessage> p;
+    p.text = text;
+    SendGamePacket(CLIENT, p);
+}
+
+bool PlayerState::ReapplyMapView(ENetPeer* CLIENT) {
+    /* @info: Re-sends the world map with the current rewrite toggles
+       applied (xray hides fg, door marker colors doors), or the original
+       map when no rewrite is on. ESP markers are re-applied afterwards,
+       because a fresh map wipes them. Returns false when no map is stored
+       yet, in which case the toggles apply on the next world join. */
+    bool sent = false;
+    if (xray || doorMark) sent = PACKET_SEND_MAP_DATA::ResendRewrittenMap(CLIENT);
+    else sent = ResendMapData(CLIENT);
+    if (sent && esp) RefreshEspMarkers(CLIENT);
+    return sent;
 }

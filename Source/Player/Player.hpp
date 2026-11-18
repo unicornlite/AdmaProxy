@@ -7,6 +7,7 @@
 #include <mutex>
 #include <chrono>
 #include <vector>
+#include <cstdint>
 
 #include "ENET/enet.h"
 
@@ -40,6 +41,19 @@ public:
     float hoverY = -1.0f;
     bool unlimitedZoom = false;
     bool doorMark = false;
+    bool autoSurgery = false;
+    /* @info: Set when the surgery patient has a condition that needs a fix
+       (exposed brain, internal bleeding, fatty liver, chaos infection,
+       undiagnosed, nose job); cleared once the fix tool is used. */
+    bool surgFindFix = false;
+    std::atomic<bool> autoFish{ false };
+    bool speedEnabled = false;
+    float speedFactor = 1.5f;
+    bool longPunch = false;
+    bool noclip = false;
+    bool esp = false;
+    bool xray = false;
+    bool spinInfo = false;
     /* @info: Original local OnSpawn text, kept so /zoom off can send the
        unmodified spawn back and restore normal zoom without a rejoin. */
     std::string lastLocalSpawn;
@@ -187,6 +201,57 @@ public:
         std::thread worker;
     }; Paste paste;
 
+    struct Fishing {
+        /* @info: Bumped on every /fish toggle so stale recast threads die
+           instead of casting after the user turned fishing off and on. */
+        std::atomic<int> generation{ 0 };
+        /* @info: True while a cast worker is running (drill check + cast),
+           so a splash and a catch message right after each other do not
+           fire two casts. */
+        std::atomic<bool> casting{ false };
+    }; Fishing fishing;
+
+    /* @info: Speed state, network thread only. The delta between the last
+       two client positions is scaled by speedFactor and added to the last
+       sent position, so the server sees the player walk faster. */
+    struct Speed {
+        float prevClientX = 0.0f, prevClientY = 0.0f;
+        float prevSentX = 0.0f, prevSentY = 0.0f;
+        bool synced = false;
+    }; Speed speed;
+
+    /* @info: Noclip state, network thread only. Tracks the client position
+       while it moves freely; while the player pushes against a wall (moving
+       intent in the character state, position not changing) the override
+       position is nudged through it instead. */
+    struct NoclipState {
+        float x = 0.0f, y = 0.0f;
+        float lastClientX = 0.0f, lastClientY = 0.0f;
+        bool synced = false;
+    }; NoclipState noclipState;
+
+    struct Pathfind {
+        std::atomic<bool> running = false;
+        std::thread worker;
+        int destX = -1, destY = -1;
+        /* @info: Current path step, guarded by worldMutex. The worker sets
+           it, PACKET_STATE overrides the outgoing position while the window
+           is open, same pattern as auto-collect. */
+        float targetX = 0.0f;
+        float targetY = 0.0f;
+        std::chrono::steady_clock::time_point targetUntil{};
+    }; Pathfind pathfind;
+
+    /* @info: ESP markers. The proxy cannot draw on the game screen, so it
+       marks tiles with bright blocks instead (yellow for drops, aqua for
+       players). Keys are (x << 32) | y; the value is the tile's real fg, so
+       turning ESP off restores it. Only air tiles are marked, because a
+       real block's extra data cannot be restored from a tile update.
+       Guarded by worldMutex. */
+    std::unordered_map<uint64_t, uint16_t> espMarkers;
+    std::unordered_map<uint32_t, uint64_t> espDropTiles;
+    std::unordered_map<int, uint64_t> espPlayerTiles;
+
 private:
     Inventory inventory;
 
@@ -207,6 +272,33 @@ public:
     void ApplyAntiGravity(ENetPacket* packet, float currentY);
     void ApplyAutoCollect(ENetPacket* packet);
     void ApplyTeleport(ENetPacket* packet);
+    void ApplySpeed(ENetPacket* packet, float clientX, float clientY);
+    void SyncSpeed(float sentX, float sentY);
+    void ApplyNoclip(ENetPacket* packet, float clientX, float clientY, int characterState);
+    void ApplyPathfind(ENetPacket* packet);
+    void ApplyLongPunch(ENetPacket* packet, int punchX, int punchY);
+
+    void AutoSurgeryStep(const std::string& dialog, ENetPeer* CLIENT, ENetPeer* SERVER);
+    bool FindWaterTile(int& outX, int& outY);
+    void CastFishing(ENetPeer* CLIENT, ENetPeer* SERVER);
+    void ScheduleFishingRecast(ENetPeer* CLIENT, ENetPeer* SERVER);
+
+    bool FindPath(int fromX, int fromY, int toX, int toY, std::vector<std::pair<int, int>>& out);
+    void PathfindLoop(ENetPeer* CLIENT, ENetPeer* SERVER);
+    void StopPathfind();
+
+    void SendTileUpdate(ENetPeer* CLIENT, int x, int y, uint16_t fg, uint16_t bg, uint16_t flag);
+    bool EspMarkTile(ENetPeer* CLIENT, int x, int y, uint16_t blockId);
+    void EspUnmarkKey(ENetPeer* CLIENT, uint64_t key);
+    void EspReleaseKey(ENetPeer* CLIENT, uint64_t key);
+    void EspMarkDrop(ENetPeer* CLIENT, const WorldDrop& drop);
+    void EspUnmarkDrop(ENetPeer* CLIENT, uint32_t uid);
+    void EspMarkPlayer(ENetPeer* CLIENT, int netId, float x, float y);
+    void EspUnmarkPlayer(ENetPeer* CLIENT, int netId);
+    void RefreshEspMarkers(ENetPeer* CLIENT);
+    void ClearEspMarkers(ENetPeer* CLIENT);
+    void EspListItems(ENetPeer* CLIENT);
+    void EspListPlayers(ENetPeer* CLIENT);
 
     void TeleportTo(float x, float y, ENetPeer* SERVER);
     void CollectItem(uint32_t uid, ENetPeer* SERVER);
@@ -221,6 +313,7 @@ public:
     void PasteSong(const std::string& path, ENetPeer* CLIENT, ENetPeer* SERVER);
 
     bool ResendMapData(ENetPeer* CLIENT);
+    bool ReapplyMapView(ENetPeer* CLIENT);
 
     void Drop(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);
     void Trash(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);

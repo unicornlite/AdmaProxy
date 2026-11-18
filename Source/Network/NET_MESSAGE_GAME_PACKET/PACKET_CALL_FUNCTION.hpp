@@ -204,6 +204,14 @@ public:
                             }
                         }
 
+                        /* @info: Auto surgery answers the tool prompts in
+                           surgery dialogs. The dialog still reaches the
+                           client, so the player watches the surgery while
+                           the proxy clicks the tools. */
+                        if (Player.autoSurgery && Method == "SERVER -> PROXY -> CLIENT") {
+                            Player.AutoSurgeryStep(dialog, CLIENT, SERVER);
+                        }
+
                         GamePacket<OnDialogRequest> p;
                         p.text = std::get<std::string>(param[1]);
                         SendGamePacket(CLIENT, p);
@@ -226,7 +234,32 @@ public:
                         */
 
                         std::string textParam = "", param2Text = std::get<std::string>(param[2]);
-                        if (Method == "SERVER -> PROXY -> CLIENT" && Packet::Contains(param2Text, "`` spun the wheel and got `") && param2Text.starts_with("`7[```") && Packet::Contains(param2Text, "`` spun the wheel and got `") && param2Text.ends_with("``!`7]``")) textParam += "`4[REAL]`w`w ";
+                        bool realSpin = Method == "SERVER -> PROXY -> CLIENT" && Packet::Contains(param2Text, "`` spun the wheel and got `") && param2Text.starts_with("`7[```") && param2Text.ends_with("``!`7]``");
+                        if (realSpin) textParam += "`4[REAL]`w`w ";
+                        /* @info: Spin info. A fake spin is player chat
+                           shaped like a result; chat carries an OID:
+                           marker, server results do not. REME is computed
+                           from the number: 0, 19 and 28 give 0, otherwise
+                           the last digit of tens + ones. Info only, the
+                           server decides the result. */
+                        if (Player.spinInfo && Method == "SERVER -> PROXY -> CLIENT" && Packet::Contains(param2Text, "spun the wheel")) {
+                            bool fakeSpin = Packet::Contains(param2Text, "OID:");
+                            if (fakeSpin && !realSpin) textParam += "`4[FAKE]`w`w ";
+                            size_t gotPos = param2Text.find("and got ");
+                            if (gotPos != std::string::npos) {
+                                try {
+                                    std::string numPart = param2Text.substr(gotPos + 8);
+                                    if (!numPart.empty() && numPart[0] == '`') numPart = numPart.substr(1);
+                                    int spin = std::stoi(numPart);
+                                    if (spin >= 0 && spin <= 36) {
+                                        int reme = (spin == 0 || spin == 19 || spin == 28) ? 0 : ((spin / 10 + spin % 10) % 10);
+                                        GamePacket<OnConsoleMessage> info;
+                                        info.text = std::string(fakeSpin ? "`4[FAKE]`w " : "`2[REAL]`w ") + "Spin " + std::to_string(spin) + " (REME: " + std::to_string(reme) + ", QEME: " + std::to_string(spin % 10) + ")";
+                                        SendGamePacket(CLIENT, info);
+                                    }
+                                } catch (...) {}
+                            }
+                        }
                         textParam += param2Text;
 
                         GamePacket<OnTalkBubble> p;
@@ -262,10 +295,33 @@ public:
                             }
                         }
 
+                        if (Player.autoFish && Method == "SERVER -> PROXY -> CLIENT" && (Packet::Contains(packet, "You caught a ") || Packet::Contains(packet, "There was nothing on the line!"))) {
+                            Player.ScheduleFishingRecast(CLIENT, SERVER);
+                        }
+
                         GamePacket<OnConsoleMessage> p;
                         p.text = packet;
                         SendGamePacket(CLIENT, p);
                         return false;
+                    }
+                    else if (std::get<std::string>(param[0]) == "OnPlayPositioned" && param.size() >= 2) {
+                        /* @info: Fishing bite. The server plays
+                           audio/splash.wav at the bait when a fish bites;
+                           the packet netid must be the local player, or
+                           another player's splash would reel us in. The
+                           reel is just another cast to the same water
+                           tile. The packet is forwarded as usual. */
+                        if (Player.autoFish && Method == "SERVER -> PROXY -> CLIENT") {
+                            int splashNetID = 0;
+                            std::memcpy(&splashNetID, packet->data + 8, sizeof(int));
+                            if (splashNetID == Player.netID) {
+                                if (auto pSound = std::get_if<std::string>(&param[1])) {
+                                    if (Packet::Contains(*pSound, "audio/splash.wav")) {
+                                        Player.CastFishing(CLIENT, SERVER);
+                                    }
+                                }
+                            }
+                        }
                     }
                     else if (std::get<std::string>(param[0]) == "OnSendToServer" && param.size() >= 6) {
                         /* @debug:
@@ -409,6 +465,16 @@ public:
                                     }
                                 }
 
+                                if (Player.esp) {
+                                    float ex = 0.0f, ey = 0.0f;
+                                    {
+                                        std::lock_guard<std::mutex> lock(Player.worldMutex);
+                                        auto it = Player.playerPositions.find(thatNetID);
+                                        if (it != Player.playerPositions.end()) { ex = it->second.x; ey = it->second.y; }
+                                    }
+                                    if (ex > 0.0f && ey > 0.0f) Player.EspMarkPlayer(CLIENT, thatNetID, ex, ey);
+                                }
+
                                 /* @info: Anti-Mod - moderators carry mstate (mod) or smstate (super mod) in their
                                    spawn data. Leave the moment one spawns, including mods already inside when we join. */
                                 if (Player.antiMod && Method == "SERVER -> PROXY -> CLIENT") {
@@ -426,6 +492,11 @@ public:
                     else if (std::get<std::string>(param[0]) == "OnRemove" && param.size() == 3) {
                         int thatNetID = Packet::ExtractCustom<int>(std::get<std::string>(param[1]), "|", 1, "\n");
                         Player.worldPlayers.erase(thatNetID);
+                        {
+                            std::lock_guard<std::mutex> lock(Player.worldMutex);
+                            Player.playerPositions.erase(thatNetID);
+                        }
+                        if (Player.esp) Player.EspUnmarkPlayer(CLIENT, thatNetID);
                         return true;
                     }
                     else if (std::get<std::string>(param[0]) == "OnCountryState" && param.size() == 2) {

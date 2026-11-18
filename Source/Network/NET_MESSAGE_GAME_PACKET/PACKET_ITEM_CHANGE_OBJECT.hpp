@@ -36,25 +36,33 @@ public:
                 x = static_cast<float>(pm.PunchX() * 32);
                 y = static_cast<float>(pm.PunchY() * 32);
             }
+            PlayerState::WorldDrop added{};
             {
                 std::lock_guard<std::mutex> lock(Player.worldMutex);
+                bool updated = false;
                 for (auto& drop : Player.worldDrops) {
                     if (drop.uid == uid) {
                         drop.itemId = itemId;
                         drop.amount = amount;
                         drop.x = x;
                         drop.y = y;
-                        return true;
+                        added = drop;
+                        updated = true;
+                        break;
                     }
                 }
-                PlayerState::WorldDrop drop{};
-                drop.uid = uid;
-                drop.itemId = itemId;
-                drop.amount = amount;
-                drop.x = x;
-                drop.y = y;
-                Player.worldDrops.push_back(drop);
+                if (!updated) {
+                    PlayerState::WorldDrop drop{};
+                    drop.uid = uid;
+                    drop.itemId = itemId;
+                    drop.amount = amount;
+                    drop.x = x;
+                    drop.y = y;
+                    Player.worldDrops.push_back(drop);
+                    added = drop;
+                }
             }
+            if (Player.esp) Player.EspMarkDrop(CLIENT, added);
             return true;
         }
 
@@ -63,6 +71,7 @@ public:
            -1 there and the UID at 0x14, GTProxy reads the UID from 0x08. */
         uint32_t uid08 = static_cast<uint32_t>(pm.Uid());
         uint32_t uid14 = static_cast<uint32_t>(pm.PlantingTree());
+        uint32_t removedUid = uid08 != 0xFFFFFFFFu ? uid08 : uid14;
         {
             std::lock_guard<std::mutex> lock(Player.worldMutex);
             auto& drops = Player.worldDrops;
@@ -77,6 +86,7 @@ public:
                 }), drops.end());
             }
         }
+        if (Player.esp) Player.EspUnmarkDrop(CLIENT, removedUid);
         return true;
     }
 };

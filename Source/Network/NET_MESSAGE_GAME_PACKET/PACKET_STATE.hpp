@@ -22,20 +22,35 @@ public:
         */
         
         if (Method == "CLIENT -> PROXY -> SERVER" && (pm.NetID() == Player.netID || pm.NetID() == 0)) {
-            if (pm.PunchX() == -1 && pm.PunchY() == -1) Player.position.x = pm.X(), Player.position.y = pm.Y();
-            Player.ApplyAntiGravity(packet, pm.Y());
+            float clientX = pm.X(), clientY = pm.Y();
+            if (pm.PunchX() == -1 && pm.PunchY() == -1) Player.position.x = clientX, Player.position.y = clientY;
+            /* @info: Override order. Speed scales the real movement delta
+               first; anti-gravity locks Y; noclip nudges through walls;
+               auto-collect and pathfind replace the position with their
+               target; teleport wins while its burst lasts. Long punch
+               extends the punch coordinates on punch packets. SyncSpeed
+               runs last so the speed baseline matches what was sent. */
+            Player.ApplySpeed(packet, clientX, clientY);
+            Player.ApplyAntiGravity(packet, clientY);
+            Player.ApplyNoclip(packet, clientX, clientY, pm.CharacterState());
             Player.ApplyAutoCollect(packet);
+            Player.ApplyPathfind(packet);
             Player.ApplyTeleport(packet);
+            Player.ApplyLongPunch(packet, pm.PunchX(), pm.PunchY());
+            Player.SyncSpeed(pm.X(), pm.Y());
         }
 
         if (Method == "SERVER -> PROXY -> CLIENT" && pm.NetID() > 0 && pm.NetID() != Player.netID) {
             /* @info: Last known position of every other player, used by
                /tp <player name>. Only movement packets carry a position. */
             if (pm.PunchX() == -1 && pm.PunchY() == -1) {
-                std::lock_guard<std::mutex> lock(Player.worldMutex);
-                auto& pos = Player.playerPositions[pm.NetID()];
-                pos.x = pm.X();
-                pos.y = pm.Y();
+                {
+                    std::lock_guard<std::mutex> lock(Player.worldMutex);
+                    auto& pos = Player.playerPositions[pm.NetID()];
+                    pos.x = pm.X();
+                    pos.y = pm.Y();
+                }
+                if (Player.esp) Player.EspMarkPlayer(CLIENT, pm.NetID(), pm.X(), pm.Y());
             }
         }
 

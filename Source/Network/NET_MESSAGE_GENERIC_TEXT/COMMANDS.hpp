@@ -6,6 +6,7 @@
 #include "../../Logger/Logger.hpp"
 #include "../../Functions/Functions.hpp"
 #include "../../Player/Player.hpp"
+#include "../../Items/Items.hpp"
 
 #include <variant>
 #include <vector>
@@ -48,6 +49,24 @@ public:
 			p.text += "add_custom_textbox|`4/tp [x y / name]  `o(Teleports To Coordinates, A Player, Or The Saved Point)|size:small|\n";
 			p.text += "add_custom_textbox|`4/tpset  `o(Saves The Current Position As Teleport Point)|size:small|\n";
 			p.text += "add_custom_textbox|`4/doormark  `o(Marks Open Doors Green And Closed Doors Red)|size:small|\n";
+			p.text += "add_spacer|small|\n";
+			p.text += "add_custom_textbox|`wAutomation:|size:medium|\n";
+			p.text += "add_custom_textbox|`4/surg  `o(Starts/Stops Auto Surgery)|size:small|\n";
+			p.text += "add_custom_textbox|`4/fish  `o(Starts/Stops Auto Fishing)|size:small|\n";
+			p.text += "add_spacer|small|\n";
+			p.text += "add_custom_textbox|`wMovement:|size:medium|\n";
+			p.text += "add_custom_textbox|`4/pathfind <x> <y>  `o(Walks To Tile Coordinates)|size:small|\n";
+			p.text += "add_custom_textbox|`4/pfind <item>  `o(Walks To The Nearest Drop With That Name)|size:small|\n";
+			p.text += "add_custom_textbox|`4/speed [number]  `o(Walks Faster, Default 1.5x)|size:small|\n";
+			p.text += "add_custom_textbox|`4/longpunch  `o(Starts/Stops Long Punch)|size:small|\n";
+			p.text += "add_custom_textbox|`4/noclip  `o(Starts/Stops Walking Through Walls)|size:small|\n";
+			p.text += "add_spacer|small|\n";
+			p.text += "add_custom_textbox|`wVision:|size:medium|\n";
+			p.text += "add_custom_textbox|`4/esp  `o(Marks Drops And Players With Bright Blocks)|size:small|\n";
+			p.text += "add_custom_textbox|`4/espitem  `o(Lists Drops In This World)|size:small|\n";
+			p.text += "add_custom_textbox|`4/espplayer  `o(Lists Players In This World)|size:small|\n";
+			p.text += "add_custom_textbox|`4/xray  `o(Hides Foreground Blocks)|size:small|\n";
+			p.text += "add_custom_textbox|`4/spininfo  `o(Shows If A Roulette Spin Is Real Or Fake, Plus REME)|size:small|\n";
 			p.text += "add_spacer|small|\n";
 			p.text += "add_custom_textbox|`wInformation:|size:medium|\n";
 			p.text += "add_custom_textbox|`4/balance  `o(Shows Your Current World Lock Balance)|size:small|\n";
@@ -998,11 +1017,385 @@ public:
 			if (Player.doorMark) {
 				text = "Door marker deactivated! Doors show normally again.";
 				Player.doorMark = false;
-				if (!Player.ResendMapData(CLIENT)) text += " (Rejoin the world to restore the view.)";
+				if (!Player.ReapplyMapView(CLIENT)) text += " (Takes effect when you join a world.)";
 			}
 			else {
-				text = "Door marker activated! Open doors show green, closed doors show red. Rejoin the world to apply it.";
+				text = "Door marker activated! Open doors show green, closed doors show red.";
 				Player.doorMark = true;
+				if (!Player.ReapplyMapView(CLIENT)) text += " (Takes effect when you join a world.)";
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/surg") {
+			std::string text;
+			if (Player.autoSurgery) {
+				text = "Auto surgery deactivated!";
+				Player.autoSurgery = false;
+			}
+			else {
+				text = "Auto surgery activated! Wrench a patient to start; the proxy clicks the tools.";
+				Player.autoSurgery = true;
+				Player.surgFindFix = false;
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/fish") {
+			std::string text;
+			if (Player.autoFish) {
+				text = "Auto fishing deactivated!";
+				Player.autoFish = false;
+				Player.fishing.generation++;
+			}
+			else {
+				text = "Auto fishing activated! Equip your Fishing Rod and stand next to water.";
+				Player.autoFish = true;
+				Player.fishing.generation++;
+				Player.CastFishing(CLIENT, SERVER);
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/pathfind" || Packet::Contains(command, "/pathfind ")) {
+			std::string text;
+			if (command == "/pathfind") {
+				if (Player.pathfind.running) {
+					Player.StopPathfind();
+					text = "Pathfind stopped.";
+				}
+				else text = "Usage: /pathfind <x> <y>";
+			}
+			else {
+				std::string rest = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				if (rest.find(' ') == std::string::npos) {
+					text = "Usage: /pathfind <x> <y>";
+				}
+				else {
+					int x = Packet::ExtractCustom<int>(rest, "", 0, " ");
+					int y = Packet::ExtractCustom<int>(rest, " ", 1, "\n");
+					if (x < 0 || y < 0) {
+						text = "Invalid coordinates. Usage: /pathfind <x> <y>";
+					}
+					else {
+						Player.StopPathfind();
+						{
+							std::lock_guard<std::mutex> lock(Player.worldMutex);
+							Player.pathfind.destX = x;
+							Player.pathfind.destY = y;
+						}
+						Player.pathfind.running = true;
+						Player.pathfind.worker = std::thread(&PlayerState::PathfindLoop, &Player, CLIENT, SERVER);
+						Player.pathfind.worker.detach();
+						text = "Walking to (" + std::to_string(x) + ", " + std::to_string(y) + ").";
+					}
+				}
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/pfind" || Packet::Contains(command, "/pfind ")) {
+			std::string text;
+			if (command == "/pfind") {
+				if (Player.pathfind.running) {
+					Player.StopPathfind();
+					text = "Pathfind stopped.";
+				}
+				else text = "Usage: /pfind <item name>";
+			}
+			else {
+				std::string query = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				auto toLower = [](std::string s) {
+					for (auto& c : s) if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+					return s;
+				};
+				std::string needle = toLower(query);
+				PlayerState::WorldDrop best{};
+				bool found = false;
+				float bestDist = 0.0f;
+				{
+					std::lock_guard<std::mutex> lock(Player.worldMutex);
+					for (const auto& drop : Player.worldDrops) {
+						const Items* it = FindItemById(drop.itemId);
+						std::string name = it ? toLower(it->raw_name) : "";
+						if (name.find(needle) == std::string::npos) continue;
+						float dx = drop.x - Player.position.x, dy = drop.y - Player.position.y;
+						float dist = dx * dx + dy * dy;
+						if (!found || dist < bestDist) {
+							bestDist = dist;
+							best = drop;
+							found = true;
+						}
+					}
+				}
+				if (!found) {
+					text = "No drop named [" + query + "] in this world.";
+				}
+				else {
+					int tx = static_cast<int>(best.x) / 32, ty = static_cast<int>(best.y) / 32;
+					Player.StopPathfind();
+					{
+						std::lock_guard<std::mutex> lock(Player.worldMutex);
+						Player.pathfind.destX = tx;
+						Player.pathfind.destY = ty;
+					}
+					Player.pathfind.running = true;
+					Player.pathfind.worker = std::thread(&PlayerState::PathfindLoop, &Player, CLIENT, SERVER);
+					Player.pathfind.worker.detach();
+					const Items* it = FindItemById(best.itemId);
+					std::string name = it ? it->raw_name : ("item " + std::to_string(best.itemId));
+					text = "Walking to the nearest " + name + ".";
+				}
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/speed" || Packet::Contains(command, "/speed ")) {
+			std::string text;
+			if (command == "/speed") {
+				if (Player.speedEnabled) {
+					text = "Speed deactivated! Walking normally again.";
+					Player.speedEnabled = false;
+				}
+				else {
+					text = "Speed activated! Walking faster.";
+					Player.speedEnabled = true;
+				}
+				Player.speed.synced = false;
+			}
+			else {
+				std::string rest = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				float factor = 0.0f;
+				try { factor = std::stof(rest); } catch (...) { factor = 0.0f; }
+				if (factor < 0.5f || factor > 5.0f) {
+					text = "Invalid speed. Usage: /speed <0.5 - 5>";
+				}
+				else {
+					Player.speedFactor = factor;
+					Player.speedEnabled = true;
+					Player.speed.synced = false;
+					text = "Speed set to " + rest + "x.";
+				}
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/longpunch") {
+			std::string text;
+			if (Player.longPunch) {
+				text = "Long punch deactivated! Normal reach again.";
+				Player.longPunch = false;
+			}
+			else {
+				text = "Long punch activated! Punches and placements reach 10 tiles.";
+				Player.longPunch = true;
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/noclip") {
+			std::string text;
+			if (Player.noclip) {
+				text = "Noclip deactivated! Walls are solid again.";
+				Player.noclip = false;
+			}
+			else {
+				text = "Noclip activated! Push against a wall to phase through it.";
+				Player.noclip = true;
+			}
+			Player.noclipState.synced = false;
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/esp") {
+			std::string text;
+			if (Player.esp) {
+				text = "ESP deactivated! Markers removed.";
+				Player.esp = false;
+				Player.ClearEspMarkers(CLIENT);
+			}
+			else {
+				text = "ESP activated! Drops show yellow, players show aqua. This is not a real overlay.";
+				Player.esp = true;
+				Player.RefreshEspMarkers(CLIENT);
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/espitem") {
+			Player.EspListItems(CLIENT);
+			return false;
+		}
+
+		else if (command == "/espplayer") {
+			Player.EspListPlayers(CLIENT);
+			return false;
+		}
+
+		else if (command == "/xray") {
+			std::string text;
+			if (Player.xray) {
+				text = "X-ray deactivated! Blocks show normally again.";
+				Player.xray = false;
+				if (!Player.ReapplyMapView(CLIENT)) text += " (Takes effect when you join a world.)";
+			}
+			else {
+				text = "X-ray activated! Foreground blocks are hidden.";
+				Player.xray = true;
+				if (!Player.ReapplyMapView(CLIENT)) text += " (Takes effect when you join a world.)";
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/spininfo") {
+			std::string text;
+			if (Player.spinInfo) {
+				text = "Spin info deactivated!";
+				Player.spinInfo = false;
+			}
+			else {
+				text = "Spin info activated! Roulette spins show REAL/FAKE plus REME.";
+				Player.spinInfo = true;
 			}
 
 			{

@@ -65,8 +65,37 @@ time. Everything is controlled from inside the game with slash commands: type
 - `/tp` - Teleports to the point saved with `/tpset`.
 - `/tpset` - Saves the current position as the teleport point.
 - `/doormark` - Shows open doors as green blocks and closed doors as red
-  blocks. Takes effect on the next world join; turning it off restores the
-  view right away.
+  blocks. It applies right away; turning it off restores the
+  view right away, no rejoin needed.
+
+### Automation
+
+- `/surg` - Auto surgery. Answers the tool prompts in surgery dialogs.
+  Start surgery normally (wrench the patient); the proxy clicks the tools.
+- `/fish` - Auto fishing. Casts the bait, reels when a fish bites, recasts
+  after a catch. Equip the Fishing Rod and stand next to water.
+
+### Movement
+
+- `/pathfind <x> <y>` - Walks to tile coordinates along a path (A* over the
+  tile map). Run again with no arguments to stop.
+- `/pfind <item>` - Walks to the nearest drop with that name.
+- `/speed [number]` - Walks faster. Default 1.5x; `/speed 2` sets 2x
+  (0.5 to 5). Plain `/speed` toggles it.
+- `/longpunch` - Punches and places from up to 10 tiles away.
+- `/noclip` - Walks through walls. Push against a wall to phase through it.
+
+### Vision
+
+- `/esp` - Marks drops with yellow blocks and players with aqua blocks on
+  your screen. This is not a real overlay; the proxy cannot draw on the
+  game screen.
+- `/espitem` - Lists drops in this world with distance and direction.
+- `/espplayer` - Lists players in this world with distance and direction.
+- `/xray` - Hides foreground blocks so you can see through walls. Toggle
+  restores the normal view right away.
+- `/spininfo` - Shows whether a roulette spin is real or fake, plus the
+  REME number. Info only; the result is decided by the server.
 
 ### Information
 
@@ -124,7 +153,7 @@ time. Everything is controlled from inside the game with slash commands: type
   item (220) plays one fixed song and has no pitch, so it is not part of the
   song.
 - **Door marker** replaces door tiles with solid green (open) and red (closed)
-  blocks on your screen only. It applies when a world loads; turning it off
+  blocks on your screen only. It applies right away; turning it off
   resends the original map to restore the view.
 - **Unlimited zoom** only changes what your client renders. The server still
   treats you as a normal player.
@@ -132,6 +161,48 @@ time. Everything is controlled from inside the game with slash commands: type
   from the map packet. Tiles with an unknown extra-data type stop the parse
   with a warning in the proxy log; features using the map then work on partial
   data until you rejoin.
+
+## Automation, movement and vision notes
+
+- **Auto surgery** reads the patient status from the surgery dialog text
+  and answers with the matching tool. The symptom-to-tool rules come from
+  a field-used auto-surgery implementation written for a private server,
+  and match the official surgery guide's dialog flow, but they are not
+  verified against a live capture from the official server. The player
+  must own the tools; the proxy stops with a message when a needed tool
+  is missing.
+- **Auto fishing** casts with a plain item use (Wiggly Worm on a water
+  tile, found from the map), detects the bite from the splash sound
+  packet, and reels by casting again. The drill (Hand Drill on Ice Crust
+  Block) and detonate (Nuclear Detonator on Uranium Block) steps are also
+  plain item uses; that packet form is not verified against a capture, so
+  it needs in-game testing. The `PACKET_GONE_FISHIN` packet (type 31) is
+  not used by the real fishing flow.
+- **Pathfind** runs A* over the parsed tile map. A tile is walkable when
+  it has no foreground block, or its block has no collision (or is a
+  platform) in items.dat; unknown items count as solid. The path may climb
+  through open air, because the proxy moves the player along it with
+  position overrides rather than simulating jumps. Needs in-game testing.
+- **Speed** scales the movement delta in outgoing packets. The server may
+  reject movement that is too fast (rubber-band). Needs in-game testing.
+- **Long punch** extends punch coordinates to 10 tiles out. The server
+  may validate the distance. Needs in-game testing.
+- **Noclip** nudges the player through a wall while pushing against it.
+  Jumps can go slightly higher while it is on (at the jump apex the
+  vertical speed briefly reads as zero while the jumping flag is still
+  set). Needs in-game testing.
+- **ESP** is not a real overlay: it replaces air tiles with bright blocks
+  (yellow for drops, aqua for players) and prints lists to the console.
+  Markers only sit on air tiles, because a real block's extra data cannot
+  be restored from a tile update.
+- **X-ray** hides foreground blocks client-side by rewriting the map; tile
+  updates stay hidden while it is on. Toggle restores the original view.
+- **Spin info:** a real spin is a server talk bubble with no `OID:`
+  marker; a fake spin is player chat shaped like a result, and chat
+  carries `OID:`. REME is computed from the number: 0, 19 and 28 give 0,
+  otherwise the last digit of tens + ones (14 gives 5, 18 gives 9). QEME
+  is the last digit of the number. Info only; the result is decided by
+  the server and cannot be changed.
 
 ## Screenshots
 

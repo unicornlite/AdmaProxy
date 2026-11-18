@@ -189,37 +189,66 @@ public:
 
         if (Type != 4 || !packet || !packet->data) return true;
         if (Method != "SERVER -> PROXY -> CLIENT") return true;
+        if (packet->dataLength < 60) return true;
 
-        const uint8_t* data = packet->data;
-        size_t size = packet->dataLength;
+        /* Keep the untouched packet so rewrite toggles can restore it. */
+        {
+            std::lock_guard<std::mutex> lock(Player.worldMutex);
+            Player.lastMapPacket.assign(packet->data, packet->data + packet->dataLength);
+        }
 
+        ParseMap(packet->data, packet->dataLength, true);
+
+        if (Player.esp) Player.RefreshEspMarkers(CLIENT);
+
+        return true;
+    }
+
+    /* @info: Re-sends the stored map with the current rewrite toggles
+       (xray, door marker) applied, so toggling works without a rejoin.
+       The stored world state is NOT overwritten: drops collected since
+       the map arrived would otherwise come back from the dead. */
+    static inline bool ResendRewrittenMap(ENetPeer* CLIENT) {
+        std::vector<uint8_t> copy;
+        {
+            std::lock_guard<std::mutex> lock(Player.worldMutex);
+            if (Player.lastMapPacket.empty()) return false;
+            copy = Player.lastMapPacket;
+        }
+        ParseMap(copy.data(), copy.size(), false);
+        if (!CLIENT || CLIENT->state != ENET_PEER_STATE_CONNECTED) return false;
+        ENetPacket* p = enet_packet_create(copy.data(), copy.size(), ENET_PACKET_FLAG_RELIABLE);
+        if (!p) return false;
+        {
+            std::lock_guard<std::mutex> lock(Network.peer_mutex);
+            enet_peer_send(CLIENT, 0, p);
+        }
+        return true;
+    }
+
+private:
+    static inline void ParseMap(uint8_t* data, size_t size, bool storeState) {
         /* @info: Map data starts behind the 4-byte message type and the
            56-byte tank header: version u16, skip 4, name (u16-len string),
            tile map (w i32, h i32, count u32, skip 5, tiles), object map
            (skip 12, count u32, drop id u32, objects). Layout from GTProxy
            src/world/world.hpp, tile_map.hpp, object_map.hpp. */
-        if (size < 60) return true;
-
-        /* Keep the untouched packet so rewrite toggles can restore it. */
-        {
-            std::lock_guard<std::mutex> lock(Player.worldMutex);
-            Player.lastMapPacket.assign(data, data + size);
-        }
+        if (!data || size < 60) return;
 
         MapCursor cur{ data, size, 60 };
         uint16_t version = 0;
         std::string worldName;
-        if (!cur.ReadU16(version)) return true;
-        if (!cur.Skip(4)) return true;
-        if (!cur.ReadString(worldName)) return true;
+        if (!cur.ReadU16(version)) return;
+        if (!cur.Skip(4)) return;
+        if (!cur.ReadString(worldName)) return;
 
         int32_t w = 0, h = 0;
         uint32_t tileCount = 0;
-        if (!cur.ReadI32(w) || !cur.ReadI32(h) || !cur.ReadU32(tileCount)) return true;
-        if (!cur.Skip(5)) return true;
+        if (!cur.ReadI32(w) || !cur.ReadI32(h) || !cur.ReadU32(tileCount)) return;
+        if (!cur.Skip(5)) return;
         if (w <= 0 || h <= 0 || w > 1000 || h > 1000 || tileCount > 1000000) {
             LOG_WARN("Map data for [{}] has impossible size {}x{} ({} tiles), ignoring.", worldName, w, h, tileCount);
-            return true;
+            return;
         }
         if (tileCount != static_cast<uint32_t>(w) * static_cast<uint32_t>(h)) {
             LOG_WARN("Map data for [{}]: tile count {} != {}x{}.", worldName, tileCount, w, h);
@@ -228,6 +257,7 @@ public:
         std::vector<PlayerState::WorldTile> tiles;
         tiles.reserve(tileCount);
         bool doorMark = Player.doorMark;
+        bool xray = Player.xray;
         bool ok = true;
         for (uint32_t i = 0; i < tileCount; i++) {
             size_t tileStart = cur.pos;
@@ -251,12 +281,17 @@ public:
             tile.flag = flag;
             tiles.push_back(tile);
 
-            /* @info: Door marker. The stored tile keeps the real door id;
-               only the packet the client sees is rewritten, green when the
-               Open flag is set, red when it is not. */
-            if (doorMark && TileIsDoor(fg)) {
+            /* @info: Client-side rewrites. The stored tile keeps the real
+               ids; only the packet the client sees is changed. X-ray hides
+               every foreground block, door marker colors doors green when
+               the Open flag is set, red when it is not. */
+            if (xray) {
+                uint16_t air = 0;
+                std::memcpy(data + tileStart, &air, sizeof(uint16_t));
+            }
+            else if (doorMark && TileIsDoor(fg)) {
                 uint16_t marker = (flag & TILE_FLAG_OPEN) ? BLOCK_GREEN : BLOCK_RED;
-                std::memcpy(packet->data + tileStart, &marker, sizeof(uint16_t));
+                std::memcpy(data + tileStart, &marker, sizeof(uint16_t));
             }
         }
 
@@ -290,6 +325,8 @@ public:
             LOG_WARN("Map data for [{}] did not parse fully ({} of {} tiles, {} drops). Features using the map work on partial data.", worldName, tiles.size(), tileCount, drops.size());
         }
 
+        if (!storeState) return;
+
         LOG_DEBUG("World Name: {}", worldName);
         LOG_DEBUG("World Size: {} x {}", w, h);
         LOG_DEBUG("Total Blocks: {}", tileCount);
@@ -304,7 +341,5 @@ public:
             Player.worldDrops = std::move(drops);
             Player.playerPositions.clear();
         }
-
-        return true;
     }
 };
