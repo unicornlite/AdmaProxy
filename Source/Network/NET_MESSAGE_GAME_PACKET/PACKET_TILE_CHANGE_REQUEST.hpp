@@ -23,7 +23,25 @@ public:
 
         /* @info: Anti-Gravity - punch/place packets also carry the player position,
            so lock their Y as well or the falling height would leak to the server. */
-        if (Method == "CLIENT -> PROXY -> SERVER" && (pm.NetID() == Player.netID || pm.NetID() == 0)) Player.ApplyAntiGravity(packet, pm.Y());
+        if (Method == "CLIENT -> PROXY -> SERVER" && (pm.NetID() == Player.netID || pm.NetID() == 0)) {
+            /* @info: Teleport hotkey. Hold the key (F8 by default, see
+               Main.TELEPORT_HOTKEY) and punch a tile with your fist: the
+               punch packet is dropped so the block is not hit, and the
+               player teleports to the center of that tile. The follow-up
+               STATE packet still goes through; the server only punches on
+               TILE_CHANGE_REQUEST, never on STATE. */
+            if (pm.PlantingTree() == 18 && pm.PunchX() >= 0 && pm.PunchY() >= 0 &&
+                (GetAsyncKeyState(Main.TELEPORT_HOTKEY) & 0x8000)) {
+                float tx = static_cast<float>(pm.PunchX() * 32 + 16);
+                float ty = static_cast<float>(pm.PunchY() * 32 + 16);
+                Player.TeleportTo(tx, ty, SERVER);
+                return false;
+            }
+
+            Player.ApplyAntiGravity(packet, pm.Y());
+            Player.ApplyAutoCollect(packet);
+            Player.ApplyTeleport(packet);
+        }
 
         if (Method == "SERVER -> PROXY -> CLIENT" && pm.NetID() == Player.netID && 
             pm.PlantingTree() > 0 &&  

@@ -5,6 +5,9 @@
 #include "../Items/Items.hpp"
 
 #include <random>
+#include <algorithm>
+#include <fstream>
+#include <sstream>
 
 PlayerState Player;
 
@@ -35,6 +38,28 @@ void PlayerState::Reset() {
     antiMod = false;
     antiGravity = false;
     hoverY = -1.0f;
+    unlimitedZoom = false;
+    doorMark = false;
+    lastLocalSpawn.clear();
+    lastWorldFile.clear();
+    lastSongFile.clear();
+
+    ClearWorld();
+
+    autocollect.running = false;
+    autocollect.targetX = 0.0f;
+    autocollect.targetY = 0.0f;
+    autocollect.targetUntil = {};
+    autocollect.attempts.clear();
+
+    teleport.x = 0.0f;
+    teleport.y = 0.0f;
+    teleport.until = {};
+    teleport.savedX = 0.0f;
+    teleport.savedY = 0.0f;
+    teleport.hasSaved = false;
+
+    paste.running = false;
 
     position.x = 0.0f;
     position.y = 0.0f;
@@ -444,4 +469,348 @@ void PlayerState::AutoSpam(ENetPeer* CLIENT, ENetPeer* SERVER) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(autospam.delay));
     }
+}
+
+// ---------------- World state ----------------
+void PlayerState::ClearWorld() {
+    std::lock_guard<std::mutex> lock(worldMutex);
+    worldWidth = 0;
+    worldHeight = 0;
+    worldTiles.clear();
+    worldDrops.clear();
+    playerPositions.clear();
+    lastMapPacket.clear();
+    autocollect.targetX = 0.0f;
+    autocollect.targetY = 0.0f;
+    autocollect.targetUntil = {};
+    autocollect.attempts.clear();
+    teleport.x = 0.0f;
+    teleport.y = 0.0f;
+    teleport.until = {};
+}
+
+void PlayerState::ApplyAutoCollect(ENetPacket* packet) {
+    /* @info: Auto-Collect. While the worker's target window is open, the
+       outgoing position is rewritten to the drop's position so the player
+       stands on it. With anti-gravity on, only X is overridden and Y stays
+       locked at the hover height. Same in-place edit pattern as
+       ApplyAntiGravity. */
+    if (!autocollect.running || !packet || packet->dataLength < 44) return;
+    std::lock_guard<std::mutex> lock(worldMutex);
+    if (std::chrono::steady_clock::now() >= autocollect.targetUntil) return;
+    std::memcpy(packet->data + 4 + 0x18, &autocollect.targetX, sizeof(float));
+    if (!antiGravity) {
+        std::memcpy(packet->data + 4 + 0x1C, &autocollect.targetY, sizeof(float));
+        float zero = 0.0f;
+        std::memcpy(packet->data + 4 + 0x24, &zero, sizeof(float));
+    }
+}
+
+void PlayerState::ApplyTeleport(ENetPacket* packet) {
+    /* @info: Teleport. While the burst window is open, outgoing STATE packets
+       carry the target position instead of the real one, and speed is zeroed
+       so the player does not drift away. Applied after anti-gravity and
+       auto-collect, so the teleport wins while it lasts. */
+    if (!packet || packet->dataLength < 44) return;
+    std::lock_guard<std::mutex> lock(worldMutex);
+    if (std::chrono::steady_clock::now() >= teleport.until) return;
+    std::memcpy(packet->data + 4 + 0x18, &teleport.x, sizeof(float));
+    std::memcpy(packet->data + 4 + 0x1C, &teleport.y, sizeof(float));
+    float zero = 0.0f;
+    std::memcpy(packet->data + 4 + 0x20, &zero, sizeof(float));
+    std::memcpy(packet->data + 4 + 0x24, &zero, sizeof(float));
+}
+
+void PlayerState::TeleportTo(float x, float y, ENetPeer* SERVER) {
+    /* @info: Teleport. The override window rewrites the client's own outgoing
+       STATE packets, and the burst below sends our own STATE packets straight
+       to the server, so the move lands even while the client is idle. After
+       the window the server echoes the new position back to the client. */
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        teleport.x = x;
+        teleport.y = y;
+        teleport.until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
+    }
+
+    std::thread([x, y, SERVER]() {
+        for (int i = 0; i < 6; i++) {
+            if (SERVER && SERVER->state == ENET_PEER_STATE_CONNECTED) {
+                std::lock_guard<std::mutex> lock(Network.peer_mutex);
+                PlayerMovingPacket pkt;
+                pkt.PacketType(Network.PACKET_STATE)
+                    .NetID(Player.netID)
+                    .Position(x, y)
+                    .Punch(-1, -1)
+                    .Send(SERVER);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+    }).detach();
+}
+
+void PlayerState::CollectItem(uint32_t uid, ENetPeer* SERVER) {
+    /* @info: ITEM_ACTIVATE_OBJECT_REQUEST (type 11). The drop UID goes in the
+       0x14 field (PlantingTree slot); the server looks the drop up by it. */
+    if (!SERVER || SERVER->state != ENET_PEER_STATE_CONNECTED) return;
+    std::lock_guard<std::mutex> lock(Network.peer_mutex);
+    PlayerMovingPacket pkt;
+    pkt.PacketType(Network.PACKET_ITEM_ACTIVATE_OBJECT_REQUEST)
+        .NetID(netID)
+        .PlantingTree(static_cast<int>(uid))
+        .Position(position.x, position.y)
+        .Punch(-1, -1)
+        .Send(SERVER);
+}
+
+void PlayerState::AutoCollectLoop(ENetPeer* CLIENT, ENetPeer* SERVER) {
+    while (autocollect.running) {
+        WorldDrop target{};
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(worldMutex);
+            auto now = std::chrono::steady_clock::now();
+            float best = 0.0f;
+            for (const auto& drop : worldDrops) {
+                auto it = autocollect.attempts.find(drop.uid);
+                if (it != autocollect.attempts.end() && now - it->second < std::chrono::seconds(3)) continue;
+                float dx = drop.x - position.x, dy = drop.y - position.y;
+                float dist = dx * dx + dy * dy;
+                if (!found || dist < best) {
+                    best = dist;
+                    target = drop;
+                    found = true;
+                }
+            }
+            if (found) {
+                autocollect.targetX = target.x;
+                autocollect.targetY = target.y;
+                autocollect.targetUntil = now + std::chrono::milliseconds(450);
+            }
+        }
+
+        if (!found) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        /* @info: Let the position override reach the server first, then ask
+           for the drop. The client would collect it on its own once it sees
+           the player standing on it, but the direct request is faster and
+           works even if the server never echoes the position back. */
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+        if (!autocollect.running) break;
+        CollectItem(target.uid, SERVER);
+        {
+            std::lock_guard<std::mutex> lock(worldMutex);
+            auto now = std::chrono::steady_clock::now();
+            autocollect.attempts[target.uid] = now;
+            for (auto it = autocollect.attempts.begin(); it != autocollect.attempts.end();) {
+                if (now - it->second > std::chrono::seconds(5)) it = autocollect.attempts.erase(it);
+                else ++it;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+}
+
+
+// ---------------- Copy world ----------------
+bool PlayerState::SaveWorldLayout(const std::string& path, int& outTiles) {
+    outTiles = 0;
+    std::vector<WorldTile> tiles;
+    int w = 0, h = 0;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        if (worldTiles.empty() || worldWidth <= 0 || worldHeight <= 0) return false;
+        tiles = worldTiles;
+        w = worldWidth;
+        h = worldHeight;
+    }
+
+    std::ofstream out(path);
+    if (!out) return false;
+    out << "ADMAPROXY-WORLD-V1\n";
+    out << w << ' ' << h << '\n';
+    for (int i = 0; i < static_cast<int>(tiles.size()); i++) {
+        if (tiles[i].fg == 0 && tiles[i].bg == 0) continue;
+        int x = i % w, y = i / w;
+        out << x << ' ' << y << ' ' << tiles[i].fg << ' ' << tiles[i].bg << '\n';
+        outTiles++;
+    }
+    return true;
+}
+
+bool PlayerState::LoadWorldLayout(const std::string& path, std::vector<WorldPlacement>& out) {
+    out.clear();
+    std::ifstream in(path);
+    if (!in) return false;
+    std::string header;
+    if (!std::getline(in, header) || header != "ADMAPROXY-WORLD-V1") return false;
+    std::string line;
+    if (!std::getline(in, line)) return false;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        WorldPlacement p{};
+        if (!(ss >> p.x >> p.y >> p.fg >> p.bg)) continue;
+        if (p.x < 0 || p.y < 0 || p.fg < 0 || p.bg < 0) continue;
+        out.push_back(p);
+    }
+    return !out.empty();
+}
+
+void PlayerState::PasteWorld(const std::string& path, ENetPeer* CLIENT, ENetPeer* SERVER) {
+    std::vector<WorldPlacement> placements;
+    if (!LoadWorldLayout(path, placements)) {
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Paste failed: could not read the world file.";
+        SendGamePacket(CLIENT, p);
+        paste.running = false;
+        return;
+    }
+
+    int placed = 0, missing = 0;
+    std::vector<int> missingIds;
+    for (const auto& tile : placements) {
+        if (!paste.running) break;
+        float px = position.x > 0.0f ? position.x : static_cast<float>(tile.x * 32 + 16);
+        float py = position.y > 0.0f ? position.y : static_cast<float>(tile.y * 32 + 16);
+        for (int pass = 0; pass < 2; pass++) {
+            int id = pass == 0 ? tile.fg : tile.bg;
+            if (id <= 0) continue;
+            if (!HasItem(id)) {
+                missing++;
+                if (std::find(missingIds.begin(), missingIds.end(), id) == missingIds.end()) missingIds.push_back(id);
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> lock(Network.peer_mutex);
+                Place(id, px, py, tile.x, tile.y, SERVER);
+            }
+            placed++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            if (!paste.running) break;
+        }
+    }
+
+    std::string text = "Paste finished: " + std::to_string(placed) + " placed, " + std::to_string(missing) + " skipped (not in inventory).";
+    if (!missingIds.empty()) {
+        text += " Missing item IDs:";
+        for (int id : missingIds) text += " " + std::to_string(id);
+    }
+    {
+        GamePacket<OnConsoleMessage> p;
+        p.text = text;
+        SendGamePacket(CLIENT, p);
+    }
+    paste.running = false;
+}
+
+
+// ---------------- Copy music ----------------
+bool PlayerState::SaveSongLayout(const std::string& path, int& outNotes) {
+    outNotes = 0;
+    std::vector<WorldTile> tiles;
+    int w = 0, h = 0;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        if (worldTiles.empty() || worldWidth <= 0 || worldHeight <= 0) return false;
+        tiles = worldTiles;
+        w = worldWidth;
+        h = worldHeight;
+    }
+
+    /* @info: A world song is its sheet-music layout: background tiles whose
+       item type is MUSIC_SHEET (28). X is the time, Y is the pitch, the item
+       id is the instrument. The Note Block item (220) plays one fixed song
+       and carries no pitch, so it is not part of the song. */
+    std::ofstream out(path);
+    if (!out) return false;
+    out << "ADMAPROXY-SONG-V1\n";
+    out << w << ' ' << h << '\n';
+    for (int i = 0; i < static_cast<int>(tiles.size()); i++) {
+        if (tiles[i].bg == 0) continue;
+        if (GetItemType(tiles[i].bg) != type::MUSIC_SHEET) continue;
+        int x = i % w, y = i / w;
+        out << x << ' ' << y << ' ' << tiles[i].bg << '\n';
+        outNotes++;
+    }
+    return true;
+}
+
+bool PlayerState::LoadSongLayout(const std::string& path, std::vector<SongNote>& out) {
+    out.clear();
+    std::ifstream in(path);
+    if (!in) return false;
+    std::string header;
+    if (!std::getline(in, header) || header != "ADMAPROXY-SONG-V1") return false;
+    std::string line;
+    if (!std::getline(in, line)) return false;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        SongNote n{};
+        if (!(ss >> n.x >> n.y >> n.itemId)) continue;
+        if (n.x < 0 || n.y < 0 || n.itemId <= 0) continue;
+        out.push_back(n);
+    }
+    return !out.empty();
+}
+
+void PlayerState::PasteSong(const std::string& path, ENetPeer* CLIENT, ENetPeer* SERVER) {
+    std::vector<SongNote> notes;
+    if (!LoadSongLayout(path, notes)) {
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Paste failed: could not read the song file.";
+        SendGamePacket(CLIENT, p);
+        paste.running = false;
+        return;
+    }
+
+    int placed = 0, missing = 0;
+    std::vector<int> missingIds;
+    for (const auto& note : notes) {
+        if (!paste.running) break;
+        float px = position.x > 0.0f ? position.x : static_cast<float>(note.x * 32 + 16);
+        float py = position.y > 0.0f ? position.y : static_cast<float>(note.y * 32 + 16);
+        if (!HasItem(note.itemId)) {
+            missing++;
+            if (std::find(missingIds.begin(), missingIds.end(), note.itemId) == missingIds.end()) missingIds.push_back(note.itemId);
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(Network.peer_mutex);
+            Place(note.itemId, px, py, note.x, note.y, SERVER);
+        }
+        placed++;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    std::string text = "Paste finished: " + std::to_string(placed) + " notes placed, " + std::to_string(missing) + " skipped (not in inventory).";
+    if (!missingIds.empty()) {
+        text += " Missing item IDs:";
+        for (int id : missingIds) text += " " + std::to_string(id);
+    }
+    {
+        GamePacket<OnConsoleMessage> p;
+        p.text = text;
+        SendGamePacket(CLIENT, p);
+    }
+    paste.running = false;
+}
+
+bool PlayerState::ResendMapData(ENetPeer* CLIENT) {
+    std::vector<uint8_t> packet;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        if (lastMapPacket.empty()) return false;
+        packet = lastMapPacket;
+    }
+    if (!CLIENT || CLIENT->state != ENET_PEER_STATE_CONNECTED) return false;
+    ENetPacket* p = enet_packet_create(packet.data(), packet.size(), ENET_PACKET_FLAG_RELIABLE);
+    if (!p) return false;
+    {
+        std::lock_guard<std::mutex> lock(Network.peer_mutex);
+        enet_peer_send(CLIENT, 0, p);
+    }
+    return true;
 }

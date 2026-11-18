@@ -263,6 +263,8 @@ public:
         return static_cast<int>(data_[0]);
     }
     int NetID() const { return Read<int>(0x04); }
+    int Uid() const { return Read<int>(0x08); }
+    float FloatVar() const { return Read<float>(0x10); }
     int CharacterState() const { return Read<int>(0x0C); }
     int PlantingTree() const { return Read<int>(0x14); }
     float X() const { return Read<float>(0x18); }

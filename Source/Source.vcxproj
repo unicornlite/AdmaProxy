@@ -171,6 +171,8 @@
     <ClInclude Include="Network\NET_MESSAGE_GAME_PACKET\PACKET_MODIFY_ITEM_INVENTORY.hpp" />
     <ClInclude Include="Network\NET_MESSAGE_GAME_PACKET\PACKET_SEND_INVENTORY_STATE.hpp" />
     <ClInclude Include="Network\NET_MESSAGE_GAME_PACKET\PACKET_SEND_MAP_DATA.hpp" />
+    <ClInclude Include="Network\NET_MESSAGE_GAME_PACKET\PACKET_SEND_TILE_UPDATE_DATA.hpp" />
+    <ClInclude Include="Network\NET_MESSAGE_GAME_PACKET\PACKET_ITEM_CHANGE_OBJECT.hpp" />
     <ClInclude Include="Network\NET_MESSAGE_GAME_PACKET\PACKET_STATE.hpp" />
     <ClInclude Include="Network\NET_MESSAGE_GAME_PACKET\PACKET_TILE_CHANGE_REQUEST.hpp" />
     <ClInclude Include="Network\NET_MESSAGE_GENERIC_TEXT\COMMANDS.hpp" />

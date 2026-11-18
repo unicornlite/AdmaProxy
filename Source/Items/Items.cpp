@@ -1,5 +1,7 @@
 #include "items.hpp"
 
+#include <algorithm>
+
 #include <filesystem>
 #include <fstream>
 #include <system_error>   /* std::error_code, for the non-throwing file_size */
@@ -370,4 +372,23 @@ std::string InjectItems() {
         + (extraPerRecord ? " (+" + std::to_string(extraPerRecord)
             + " byte(s)/record learned from the file itself)" : "")
         + note;
+}
+
+const Items* FindItemById(int id) {
+    if (id < 0) return nullptr;
+    /* @info: items.dat records are stored in id order and InjectItems appends
+       them in that order, so items[id] is normally the item itself. */
+    if (static_cast<size_t>(id) < items.size() && items[id].id == id) return &items[id];
+    auto it = std::find_if(items.begin(), items.end(), [id](const Items& i) { return i.id == id; });
+    return it == items.end() ? nullptr : &(*it);
+}
+
+int GetItemType(int id) {
+    const Items* it = FindItemById(id);
+    return it ? it->type : -1;
+}
+
+int GetItemCollision(int id) {
+    const Items* it = FindItemById(id);
+    return it ? it->collision : -1;
 }

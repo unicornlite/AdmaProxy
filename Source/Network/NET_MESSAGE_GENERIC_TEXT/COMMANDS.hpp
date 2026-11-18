@@ -38,6 +38,17 @@ public:
 			p.text += "add_custom_textbox|`4/antimod  `o(Starts/Stops Auto-Leave When A Mod Enters)|size:small|\n";
 			p.text += "add_custom_textbox|`4/antigravitasi  `o(Starts/Stops Anti-Gravity (Float In Place))|size:small|\n";
 			p.text += "add_spacer|small|\n";
+			p.text += "add_custom_textbox|`wWorld Tools:|size:medium|\n";
+			p.text += "add_custom_textbox|`4/collect  `o(Starts/Stops Auto-Collect Dropped Items)|size:small|\n";
+			p.text += "add_custom_textbox|`4/zoom  `o(Starts/Stops Unlimited Zoom)|size:small|\n";
+			p.text += "add_custom_textbox|`4/copyworld  `o(Saves The Current World Layout To A File)|size:small|\n";
+			p.text += "add_custom_textbox|`4/pasteworld [name]  `o(Rebuilds A Saved World Layout Here)|size:small|\n";
+			p.text += "add_custom_textbox|`4/copymusic  `o(Saves The World Song (Sheet Music) To A File)|size:small|\n";
+			p.text += "add_custom_textbox|`4/pastemusic [name]  `o(Rebuilds A Saved Song Here)|size:small|\n";
+			p.text += "add_custom_textbox|`4/tp [x y / name]  `o(Teleports To Coordinates, A Player, Or The Saved Point)|size:small|\n";
+			p.text += "add_custom_textbox|`4/tpset  `o(Saves The Current Position As Teleport Point)|size:small|\n";
+			p.text += "add_custom_textbox|`4/doormark  `o(Marks Open Doors Green And Closed Doors Red)|size:small|\n";
+			p.text += "add_spacer|small|\n";
 			p.text += "add_custom_textbox|`wInformation:|size:medium|\n";
 			p.text += "add_custom_textbox|`4/balance  `o(Shows Your Current World Lock Balance)|size:small|\n";
 			p.text += "add_custom_textbox|`4/account  `o(Opens a Menu That Displays All Your Account Informations)|size:small|\n";
@@ -677,6 +688,338 @@ public:
 
 			return false;
         }
+
+		else if (command == "/collect") {
+			std::string text;
+
+			if (Player.autocollect.running) {
+				text = "Stopped auto-collect!";
+				Player.autocollect.running = false;
+			}
+			else {
+				text = "Activated auto-collect! Walking to nearby drops automatically.";
+				Player.autocollect.running = true;
+				Player.autocollect.worker = std::thread(&PlayerState::AutoCollectLoop, &Player, CLIENT, SERVER);
+				Player.autocollect.worker.detach();
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/zoom") {
+			std::string text;
+			if (Player.unlimitedZoom) {
+				text = "Unlimited zoom deactivated! Zoom is back to normal.";
+				Player.unlimitedZoom = false;
+				if (!Player.lastLocalSpawn.empty()) {
+					GamePacket<OnSpawn> p;
+					p.text = Player.lastLocalSpawn;
+					SendGamePacket(CLIENT, p);
+				}
+			}
+			else {
+				text = "Unlimited zoom activated!";
+				Player.unlimitedZoom = true;
+				if (!Player.lastLocalSpawn.empty()) {
+					std::string spawn = Player.lastLocalSpawn;
+					if (Packet::Change(spawn, "\nmstate|", 1, "\n", "1")) {
+						GamePacket<OnSpawn> p;
+						p.text = spawn;
+						SendGamePacket(CLIENT, p);
+					}
+				}
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/copyworld") {
+			std::string text;
+			if (Player.world.empty()) {
+				text = "You are not in a world.";
+			}
+			else {
+				int tiles = 0;
+				std::string path = "world_" + Player.world + ".txt";
+				if (Player.SaveWorldLayout(path, tiles)) {
+					Player.lastWorldFile = path;
+					text = "World layout saved to " + path + " (" + std::to_string(tiles) + " tiles).";
+				}
+				else text = "Could not save the world layout. Wait for the world to load and try again.";
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/pasteworld" || Packet::Contains(command, "/pasteworld ")) {
+			std::string text;
+			if (Player.paste.running) {
+				text = "Paste stopped.";
+				Player.paste.running = false;
+			}
+			else if (Player.world.empty()) {
+				text = "You are not in a world.";
+			}
+			else {
+				std::string path = Player.lastWorldFile;
+				if (Packet::Contains(command, "/pasteworld ")) {
+					std::string name = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+					if (!name.empty()) path = "world_" + name + ".txt";
+				}
+				if (path.empty()) path = "world_" + Player.world + ".txt";
+				text = "Pasting world layout from " + path + "...";
+				Player.paste.running = true;
+				Player.paste.worker = std::thread(&PlayerState::PasteWorld, &Player, path, CLIENT, SERVER);
+				Player.paste.worker.detach();
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/copymusic") {
+			std::string text;
+			if (Player.world.empty()) {
+				text = "You are not in a world.";
+			}
+			else {
+				int notes = 0;
+				std::string path = "song_" + Player.world + ".txt";
+				if (Player.SaveSongLayout(path, notes)) {
+					Player.lastSongFile = path;
+					if (notes > 0) text = "Song saved to " + path + " (" + std::to_string(notes) + " notes).";
+					else text = "No sheet music found in this world. Nothing saved.";
+				}
+				else text = "Could not save the song. Wait for the world to load and try again.";
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/pastemusic" || Packet::Contains(command, "/pastemusic ")) {
+			std::string text;
+			if (Player.paste.running) {
+				text = "Paste stopped.";
+				Player.paste.running = false;
+			}
+			else if (Player.world.empty()) {
+				text = "You are not in a world.";
+			}
+			else {
+				std::string path = Player.lastSongFile;
+				if (Packet::Contains(command, "/pastemusic ")) {
+					std::string name = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+					if (!name.empty()) path = "song_" + name + ".txt";
+				}
+				if (path.empty()) path = "song_" + Player.world + ".txt";
+				text = "Pasting song from " + path + "...";
+				Player.paste.running = true;
+				Player.paste.worker = std::thread(&PlayerState::PasteSong, &Player, path, CLIENT, SERVER);
+				Player.paste.worker.detach();
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/tp" || Packet::Contains(command, "/tp ")) {
+			std::string text;
+			bool ok = false;
+			float tx = 0.0f, ty = 0.0f;
+
+			if (command == "/tp") {
+				if (Player.teleport.hasSaved) {
+					tx = Player.teleport.savedX;
+					ty = Player.teleport.savedY;
+					ok = true;
+					text = "Teleporting to the saved point.";
+				}
+				else text = "No saved point. Use /tpset first, or /tp <x> <y> or /tp <player>.";
+			}
+			else {
+				std::string rest = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				if (rest.find(' ') != std::string::npos) {
+					int x = Packet::ExtractCustom<int>(rest, "", 0, " ");
+					int y = Packet::ExtractCustom<int>(rest, " ", 1, "\n");
+					if (x > 0 && y > 0) {
+						tx = static_cast<float>(x * 32 + 16);
+						ty = static_cast<float>(y * 32 + 16);
+						ok = true;
+						text = "Teleporting to (" + std::to_string(x) + ", " + std::to_string(y) + ").";
+					}
+					else text = "Invalid coordinates. Usage: /tp <x> <y>";
+				}
+				else {
+					int foundNetID = -1;
+					for (const auto& pair : Player.worldPlayers) {
+						if (pair.second == rest) { foundNetID = pair.first; break; }
+					}
+					if (foundNetID == -1) text = "Player [" + rest + "] is not in this world.";
+					else {
+						std::lock_guard<std::mutex> lock(Player.worldMutex);
+						auto it = Player.playerPositions.find(foundNetID);
+						if (it == Player.playerPositions.end()) text = "No known position for [" + rest + "] yet.";
+						else {
+							tx = it->second.x;
+							ty = it->second.y;
+							ok = true;
+							text = "Teleporting to [" + rest + "].";
+						}
+					}
+				}
+			}
+
+			if (ok) Player.TeleportTo(tx, ty, SERVER);
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/tpset") {
+			std::string text;
+			if (Player.position.x <= 0.0f || Player.position.y <= 0.0f) {
+				text = "Unknown position. Move around a bit, then try again.";
+			}
+			else {
+				Player.teleport.savedX = Player.position.x;
+				Player.teleport.savedY = Player.position.y;
+				Player.teleport.hasSaved = true;
+				int tx = static_cast<int>(Player.position.x / 32.0f);
+				int ty = static_cast<int>(Player.position.y / 32.0f);
+				text = "Teleport point saved at (" + std::to_string(tx) + ", " + std::to_string(ty) + ").";
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/doormark") {
+			std::string text;
+			if (Player.doorMark) {
+				text = "Door marker deactivated! Doors show normally again.";
+				Player.doorMark = false;
+				if (!Player.ResendMapData(CLIENT)) text += " (Rejoin the world to restore the view.)";
+			}
+			else {
+				text = "Door marker activated! Open doors show green, closed doors show red. Rejoin the world to apply it.";
+				Player.doorMark = true;
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
 
         return true;
     }

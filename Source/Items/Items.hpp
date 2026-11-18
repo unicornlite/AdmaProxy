@@ -200,4 +200,11 @@ extern std::vector<uint8_t> im_data;
 
 extern std::string InjectItems();
 
+/* @info: Fast item lookup. items.dat stores records in id order, so the
+   vector index usually IS the id; a linear scan is the fallback. Returns
+   nullptr when items.dat was not loaded or the id is unknown. */
+extern const Items* FindItemById(int id);
+extern int GetItemType(int id);
+extern int GetItemCollision(int id);
+
 extern bool ALREADY_INJECTED;

@@ -357,8 +357,23 @@ public:
                                 Player.tankIDName = name.substr(2, name.size() - 4);
 
                                 std::string customPacket = std::get<std::string>(param[1]);
+                                Player.lastLocalSpawn = customPacket;
+
+                                /* @info: Unlimited zoom. Setting mstate to 1
+                                   makes the client treat the local player as
+                                   a moderator, which unlocks unlimited zoom.
+                                   Client-side only: the server still knows
+                                   the player is not a mod, so no server-side
+                                   mod power comes with it. Applied on every
+                                   local spawn, like the country rewrite.
+                                   The "\n" anchor keeps the search from
+                                   matching the "mstate" inside "smstate". */
+                                bool changed = false;
+                                if (Player.country.length() == 2) changed = Packet::Change(customPacket, "country|", 1, "\n", Player.country) || changed;
+                                if (Player.unlimitedZoom) changed = Packet::Change(customPacket, "\nmstate|", 1, "\n", "1") || changed;
+                                if (changed) {
                                 
-                                if (Player.country.length() == 2 && Packet::Change(customPacket, "country|", 1, "\n", Player.country)) {
+
                                     {
                                         GamePacket<OnSpawn> p;
                                         p.text = customPacket;
@@ -375,6 +390,24 @@ public:
                                 std::string thatName = name.substr(2, name.size() - 4);
 
                                 Player.worldPlayers[thatNetID] = thatName;
+
+                                /* @info: Initial position from the spawn
+                                   data, so /tp <player> works even before
+                                   the player moves. STATE packets keep it
+                                   fresh afterwards. */
+                                if (Packet::Contains(spawnText, "posXY|")) {
+                                    std::string xy = Packet::ExtractCustom<std::string>(spawnText, "posXY|", 1, "\n");
+                                    if (xy.find('|') != std::string::npos) {
+                                        int sx = Packet::ExtractCustom<int>(xy, "", 0, "|");
+                                        int sy = Packet::ExtractCustom<int>(xy, "|", 1, "\n");
+                                        if (sx > 0 && sy > 0) {
+                                            std::lock_guard<std::mutex> lock(Player.worldMutex);
+                                            auto& pos = Player.playerPositions[thatNetID];
+                                            pos.x = static_cast<float>(sx);
+                                            pos.y = static_cast<float>(sy);
+                                        }
+                                    }
+                                }
 
                                 /* @info: Anti-Mod - moderators carry mstate (mod) or smstate (super mod) in their
                                    spawn data. Leave the moment one spawns, including mods already inside when we join. */

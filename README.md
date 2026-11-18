@@ -1,7 +1,9 @@
-# 📋 Growtopia Proxy
+# 📋 AdmaProxy
+
+by unicornlite (https://github.com/unicornlite)
 Growtopia Bridge Proxy is a powerful tool that sits between the Growtopia client and server, allowing full control over network traffic. With this proxy, you can monitor, modify, and inject packets to customize your gameplay experience.
 
-Fork of [batutekoz77/GrowtopiaProxy](https://github.com/batutekoz77/GrowtopiaProxy) with added `/antimod` auto-leave and `/antigravitasi` anti-gravity features.
+Fork of [batutekoz77/GrowtopiaProxy](https://github.com/batutekoz77/GrowtopiaProxy) with added `/antimod` auto-leave, `/antigravitasi` anti-gravity, auto-collect, unlimited zoom, copy world/song, teleport, and door marker features.
 
 ---
 
@@ -61,6 +63,19 @@ Server -> Proxy -> Client
 - [x] Slash command  (/antimod) : Auto-leaves the world the moment a moderator enters (mstate/smstate detection).
 - [x] Slash command  (/antigravitasi) : Floats in place at the current height instead of falling (also works as /antigravity).
 
+## World Tools:
+- [x] Slash command  (/collect) : Automatically walks to nearby dropped items and picks them up. Nearest drop first. With /antigravitasi on, only X moves.
+- [x] Slash command  (/zoom) : Unlimited zoom (client-side only, via local OnSpawn mstate). Turning it off restores normal zoom.
+- [x] Slash command  (/copyworld) : Saves the current world layout (foreground/background per tile) to `world_<NAME>.txt` in the proxy folder.
+- [x] Slash command  (/pasteworld [name]) : Rebuilds a saved world layout here, placing blocks from your inventory one by one. Without a name it pastes the last copied world. Run again to stop.
+- [x] Slash command  (/copymusic) : Saves the world song (all sheet-music background tiles: position is time/pitch, item is the instrument) to `song_<NAME>.txt`.
+- [x] Slash command  (/pastemusic [name]) : Rebuilds a saved song here. Same rules as /pasteworld.
+- [x] Slash command  (/tp <x> <y>) : Teleports to tile coordinates.
+- [x] Slash command  (/tp <player>) : Teleports to a player's last known position.
+- [x] Slash command  (/tp) : Teleports to the point saved with /tpset.
+- [x] Slash command  (/tpset) : Saves the current position as the teleport point.
+- [x] Slash command  (/doormark) : Shows open doors as green blocks and closed doors as red blocks. Takes effect on the next world join; turning it off restores the view right away.
+
 ## Information:
 - [x] Slash command  (/balance) : Shows your current lock balance.
 - [x] Slash command  (/account) : Opens Account Informations menu.
@@ -88,6 +103,16 @@ Server -> Proxy -> Client
 
 ## Anti Lag:
 - [x] Slash command  (/hideclothes) : Hides the clothes of everyone and removes the effects.
+
+## World Tools Notes
+
+- **Teleport hotkey:** hold **F8** and punch a tile with your fist to teleport to it. The punch packet is dropped, so the block is not hit. Change the key in `Source/Main/Config.hpp` (`Main.TELEPORT_HOTKEY`, a Windows virtual-key code, `0x77` = F8).
+- **Teleport, auto-collect, and paste need in-game testing:** they assume the server accepts the proxy's position and placement packets the same way a private server (Gurotopia) does. If the server rubber-bands or rejects them, the feature will visibly fail rather than silently misbehave.
+- **Copy world is foreground/background only (v1):** locks, signs, doors, and other tile extras are not copied. The file format is plain text: a header line, the world size, then one `x y fg bg` line per non-empty tile.
+- **Copy music copies sheet music, not note blocks:** the world song is the sheet-music layout (X = time, Y = pitch, item = instrument). The Note Block item (220) plays one fixed song and has no pitch, so it is not part of the song.
+- **Door marker** replaces door tiles with solid green (open) and red (closed) blocks on your screen only. It applies when a world loads; turning it off resends the original map to restore the view.
+- **Unlimited zoom** only changes what your client renders. The server still treats you as a normal player.
+- **Map parsing limits:** the proxy parses the world tile map and drop list from the map packet. Tiles with an unknown extra-data type stop the parse with a warning in the proxy log; features using the map then work on partial data until you rejoin.
 
 ## Extra
 - [x] Fast system :       Removes delay in GamePackets.

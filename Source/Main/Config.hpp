@@ -10,6 +10,10 @@ struct gMain {
     std::string NAME = "Growtopia Proxy";
     std::string VERSION = "1.0";
     bool BASIC_LOGS = false;
+    /* @info: Teleport hotkey (virtual-key code, VK_F8 = 0x77). Hold this key
+       and click a tile with your fist to teleport to it. Change the value to
+       rebind, e.g. 0x76 for VK_F7. See WinUser.h for the full key list. */
+    int TELEPORT_HOTKEY = 0x77;
 };
 inline gMain Main;
 

@@ -24,6 +24,8 @@
 #include "NET_MESSAGE_GAME_PACKET/PACKET_CALL_FUNCTION.hpp"
 #include "NET_MESSAGE_GAME_PACKET/PACKET_TILE_CHANGE_REQUEST.hpp"
 #include "NET_MESSAGE_GAME_PACKET/PACKET_SEND_MAP_DATA.hpp"
+#include "NET_MESSAGE_GAME_PACKET/PACKET_SEND_TILE_UPDATE_DATA.hpp"
+#include "NET_MESSAGE_GAME_PACKET/PACKET_ITEM_CHANGE_OBJECT.hpp"
 #include "NET_MESSAGE_GAME_PACKET/PACKET_SEND_INVENTORY_STATE.hpp"
 #include "NET_MESSAGE_GAME_PACKET/PACKET_MODIFY_ITEM_INVENTORY.hpp"
 
@@ -173,6 +175,8 @@ bool HandlePacket(int type, ENetPacket* packet, ENetPeer* to) {
             if (!Player.world.empty()) Player.lastWorld = Player.world;
             Player.world.clear();
             if (!Player.worldPlayers.empty()) Player.worldPlayers.clear();
+            Player.ClearWorld();
+            Player.paste.running = false;
 
             if (Player.autofarm.running) {
                 Player.autofarm.running = false;
@@ -236,6 +240,12 @@ bool HandlePacket(int type, ENetPacket* packet, ENetPeer* to) {
         }
         case Network.PACKET_SEND_MAP_DATA: {
             return PACKET_SEND_MAP_DATA::Inject(Method, Type, packet, CLIENT, SERVER, pm);
+        }
+        case Network.PACKET_SEND_TILE_UPDATE_DATA: {
+            return PACKET_SEND_TILE_UPDATE_DATA::Inject(Method, Type, packet, CLIENT, SERVER, pm);
+        }
+        case Network.PACKET_ITEM_CHANGE_OBJECT: {
+            return PACKET_ITEM_CHANGE_OBJECT::Inject(Method, Type, packet, CLIENT, SERVER, pm);
         }
         case Network.PACKET_SEND_INVENTORY_STATE: {
             return PACKET_SEND_INVENTORY_STATE::Inject(Method, Type, packet, CLIENT, SERVER);
