@@ -48,6 +48,14 @@ constexpr int LONG_PUNCH_REACH = 10;
 // Noclip nudge per outgoing STATE packet while pushing against a wall.
 constexpr float NOCLIP_STEP = 8.0f;
 
+// Batch 3: Chandelier (verified id 340) breaks drop Gems (item 112).
+constexpr int ITEM_CHANDELIER = 340;
+constexpr int ITEM_GEMS = 112;
+
+// Blackjack report window: gems land within a couple of seconds of the break.
+constexpr int BJ_WINDOW_MS = 2500;
+constexpr size_t BJ_HISTORY_MAX = 10;
+
 inline uint64_t EspKey(int x, int y) {
     return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) | static_cast<uint32_t>(y);
 }
@@ -120,6 +128,7 @@ void PlayerState::Reset() {
     esp = false;
     xray = false;
     spinInfo = false;
+    blackjack = false;
     pathfind.running = false;
     pathfind.destX = -1;
     pathfind.destY = -1;
@@ -552,6 +561,9 @@ void PlayerState::ClearWorld() {
     espMarkers.clear();
     espDropTiles.clear();
     espPlayerTiles.clear();
+    bjEvents.clear();
+    bjDropAmounts.clear();
+    bjDropEvent.clear();
     speed.synced = false;
     noclipState.synced = false;
     autocollect.targetX = 0.0f;
@@ -1613,4 +1625,124 @@ bool PlayerState::ReapplyMapView(ENetPeer* CLIENT) {
     else sent = ResendMapData(CLIENT);
     if (sent && esp) RefreshEspMarkers(CLIENT);
     return sent;
+}
+
+// ---------------- Batch 3: blackjack gems counter ----------------
+
+void PlayerState::OnChandelierBreak(int x, int y, int puncherNetId, ENetPeer* CLIENT) {
+    /* @info: A Chandelier tile (fg 340) just disappeared. The puncher is
+       read from the tile update's netid field: Gurotopia builds the tile
+       update from the incoming punch state, which carries the puncher's
+       netid. That is not verified against a live capture from the official
+       server, so an unknown netid just means no name and no talk bubble.
+       Gems land within a couple of seconds, so the result is reported
+       after a short window instead of on the first drop. */
+    if (!blackjack) return;
+    int eventId = 0;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        bjEvents.erase(std::remove_if(bjEvents.begin(), bjEvents.end(),
+            [](const BjEvent& e) { return e.reported; }), bjEvents.end());
+        BjEvent ev;
+        ev.id = bjNextEventId++;
+        ev.x = x;
+        ev.y = y;
+        ev.at = std::chrono::steady_clock::now();
+        ev.puncherNetId = puncherNetId;
+        if (puncherNetId == netID) ev.puncherName = tankIDName;
+        else {
+            auto it = worldPlayers.find(puncherNetId);
+            if (it != worldPlayers.end()) ev.puncherName = it->second;
+        }
+        eventId = ev.id;
+        bjEvents.push_back(std::move(ev));
+    }
+    std::thread([this, eventId, CLIENT]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(BJ_WINDOW_MS));
+        std::string text;
+        std::string name;
+        int bubbleNetId = -1;
+        {
+            std::lock_guard<std::mutex> lock(worldMutex);
+            BjEvent* ev = nullptr;
+            for (auto& e : bjEvents) if (e.id == eventId) { ev = &e; break; }
+            if (!ev || ev->reported) return;
+            ev->reported = true;
+            name = ev->puncherName;
+            if (ev->puncherNetId > 0 && !ev->puncherName.empty()) bubbleNetId = ev->puncherNetId;
+            int total = 0;
+            for (const auto& kv : bjDropEvent) {
+                if (kv.second != eventId) continue;
+                auto amt = bjDropAmounts.find(kv.first);
+                if (amt != bjDropAmounts.end()) total += amt->second;
+            }
+            for (auto it = bjDropEvent.begin(); it != bjDropEvent.end();) {
+                if (it->second == eventId) {
+                    bjDropAmounts.erase(it->first);
+                    it = bjDropEvent.erase(it);
+                }
+                else ++it;
+            }
+            text = "Blackjack: ";
+            if (!name.empty()) text += name + " got ";
+            text += std::to_string(total);
+            if (total > 21) text += " - BUST!";
+            else if (total == 21) text += " - BLACKJACK!";
+            bjHistory.push_back(text);
+            if (bjHistory.size() > BJ_HISTORY_MAX) bjHistory.erase(bjHistory.begin());
+        }
+        if (!CLIENT || CLIENT->state != ENET_PEER_STATE_CONNECTED) return;
+        GamePacket<OnConsoleMessage> p;
+        p.text = text;
+        SendGamePacket(CLIENT, p);
+        if (bubbleNetId > 0) {
+            GamePacket<OnTalkBubble> b;
+            b.netId = bubbleNetId;
+            b.text = text;
+            SendGamePacket(CLIENT, b);
+        }
+    }).detach();
+}
+
+void PlayerState::OnGemDrop(uint32_t uid, int amount, float x, float y) {
+    /* @info: A Gems drop (item 112) appeared or changed. Update packets
+       refresh the amount of an already attributed drop; new drops are
+       attributed to the nearest unreported chandelier break within 1 tile.
+       Gems spawn at the punch position plus a small random offset, so they
+       always land on or next to the broken tile. */
+    if (!blackjack) return;
+    int tx = static_cast<int>(x) / 32;
+    int ty = static_cast<int>(y) / 32;
+    std::lock_guard<std::mutex> lock(worldMutex);
+    auto known = bjDropEvent.find(uid);
+    if (known != bjDropEvent.end()) {
+        bjDropAmounts[uid] = amount;
+        return;
+    }
+    auto now = std::chrono::steady_clock::now();
+    int bestId = -1, bestDist = 2;
+    for (const auto& e : bjEvents) {
+        if (e.reported) continue;
+        if (now - e.at > std::chrono::milliseconds(BJ_WINDOW_MS)) continue;
+        int d = std::max(std::abs(tx - e.x), std::abs(ty - e.y));
+        if (d <= 1 && (bestId < 0 || d < bestDist)) { bestId = e.id; bestDist = d; }
+    }
+    if (bestId < 0) return;
+    bjDropEvent[uid] = bestId;
+    bjDropAmounts[uid] = amount;
+}
+
+void PlayerState::BjShowLog(ENetPeer* CLIENT) {
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        if (bjHistory.empty()) text = "No blackjack results yet.";
+        else {
+            text = "Blackjack log:";
+            for (const auto& line : bjHistory) text += "\n" + line;
+        }
+    }
+    GamePacket<OnConsoleMessage> p;
+    p.text = text;
+    SendGamePacket(CLIENT, p);
 }

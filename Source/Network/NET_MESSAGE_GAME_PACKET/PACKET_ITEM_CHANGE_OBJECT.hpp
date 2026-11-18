@@ -63,6 +63,7 @@ public:
                 }
             }
             if (Player.esp) Player.EspMarkDrop(CLIENT, added);
+            if (Player.blackjack && added.itemId == 112) Player.OnGemDrop(added.uid, added.amount, added.x, added.y);
             return true;
         }
 

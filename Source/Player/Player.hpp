@@ -54,6 +54,27 @@ public:
     bool esp = false;
     bool xray = false;
     bool spinInfo = false;
+    bool blackjack = false;
+    /* @info: Recent chandelier breaks, guarded by worldMutex. Gems (item
+       112 drops) that appear near a break within the report window are
+       summed into that break's blackjack number. */
+    struct BjEvent {
+        int id = 0;
+        int x = 0, y = 0;
+        std::chrono::steady_clock::time_point at{};
+        int puncherNetId = -1;
+        std::string puncherName;
+        bool reported = false;
+    };
+    std::vector<BjEvent> bjEvents;
+    /* @info: Item-112 drop uid -> amount, and uid -> break event id. A drop
+       that is collected before the report still counts: the number is the
+       gems that came out, not the gems left on the ground. */
+    std::unordered_map<uint32_t, int> bjDropAmounts;
+    std::unordered_map<uint32_t, int> bjDropEvent;
+    int bjNextEventId = 1;
+    /* @info: Last 10 blackjack results, newest last. Guarded by worldMutex. */
+    std::vector<std::string> bjHistory;
     /* @info: Original local OnSpawn text, kept so /zoom off can send the
        unmodified spawn back and restore normal zoom without a rejoin. */
     std::string lastLocalSpawn;
@@ -314,6 +335,10 @@ public:
 
     bool ResendMapData(ENetPeer* CLIENT);
     bool ReapplyMapView(ENetPeer* CLIENT);
+
+    void OnChandelierBreak(int x, int y, int puncherNetId, ENetPeer* CLIENT);
+    void OnGemDrop(uint32_t uid, int amount, float x, float y);
+    void BjShowLog(ENetPeer* CLIENT);
 
     void Drop(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);
     void Trash(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);

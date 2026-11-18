@@ -37,11 +37,14 @@ public:
         std::memcpy(&bg, extra + 2, 2);
         std::memcpy(&flag, extra + 6, 2);
 
+        uint16_t oldFg = 0;
+
         {
             std::lock_guard<std::mutex> lock(Player.worldMutex);
             if (Player.worldWidth > 0 && x < Player.worldWidth && y < Player.worldHeight) {
                 size_t idx = static_cast<size_t>(y) * static_cast<size_t>(Player.worldWidth) + static_cast<size_t>(x);
                 if (idx < Player.worldTiles.size()) {
+                    oldFg = Player.worldTiles[idx].fg;
                     Player.worldTiles[idx].fg = fg;
                     Player.worldTiles[idx].bg = bg;
                     Player.worldTiles[idx].flag = flag;
@@ -53,6 +56,13 @@ public:
                was replaced. */
             uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) | static_cast<uint32_t>(y);
             Player.espMarkers.erase(key);
+        }
+
+        /* @info: Blackjack. A Chandelier (fg 340) that just disappeared
+           means someone broke it; gems follow within seconds. The puncher
+           is the tile update's netid (see OnChandelierBreak). */
+        if (Player.blackjack && oldFg == 340 && fg != 340) {
+            Player.OnChandelierBreak(x, y, pm.NetID(), CLIENT);
         }
 
         /* @info: Client-side rewrites, same as the map packet. X-ray hides

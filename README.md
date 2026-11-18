@@ -97,6 +97,12 @@ time. Everything is controlled from inside the game with slash commands: type
 - `/spininfo` - Shows whether a roulette spin is real or fake, plus the
   REME number. Info only; the result is decided by the server.
 
+### Casino
+
+- `/bj` - Blackjack gems counter. When a Chandelier breaks, the gems that
+  come out are counted and shown as the blackjack number (over 21 is a
+  bust). `/bjlog` shows the last 10 results.
+
 ### Information
 
 - `/balance` - Shows your current lock balance.
@@ -203,6 +209,27 @@ time. Everything is controlled from inside the game with slash commands: type
   otherwise the last digit of tens + ones (14 gives 5, 18 gives 9). QEME
   is the last digit of the number. Info only; the result is decided by
   the server and cannot be changed.
+
+## Blackjack counter notes
+
+- **How it counts:** the proxy watches tile updates for a Chandelier
+  (item 340) disappearing, then sums the amounts of the Gems drops
+  (item 112) that appear on or next to that tile within 2.5 seconds.
+  Gems are split into several drops (10s, 5s, 1s), so the total is the
+  sum of every drop's amount. A drop collected before the report still
+  counts: the number is the gems that came out, not the gems left.
+- **The result** shows in the console and, when the breaker is known,
+  as a talk bubble from that player. Over 21 is marked BUST, exactly 21
+  is BLACKJACK. `/bjlog` shows the last 10 results.
+- **The breaker** is read from the tile update's netid field. That
+  matches how the open reimplementation builds the packet (from the
+  punch state), but it is not verified against a live capture from the
+  official server. If the netid is unknown, the result shows without a
+  name and without a talk bubble.
+- **No tile-attached text exists:** no variant in any surveyed source
+  draws text at a tile position, so the console + talk bubble is the
+  display. Breaks reported through multi-tile updates (type 6) are not
+  seen yet, like the rest of the map tracking.
 
 ## Screenshots
 

@@ -68,6 +68,10 @@ public:
 			p.text += "add_custom_textbox|`4/xray  `o(Hides Foreground Blocks)|size:small|\n";
 			p.text += "add_custom_textbox|`4/spininfo  `o(Shows If A Roulette Spin Is Real Or Fake, Plus REME)|size:small|\n";
 			p.text += "add_spacer|small|\n";
+			p.text += "add_custom_textbox|`wCasino:|size:medium|\n";
+			p.text += "add_custom_textbox|`4/bj  `o(Starts/Stops The Blackjack Gems Counter)|size:small|\n";
+			p.text += "add_custom_textbox|`4/bjlog  `o(Shows The Last 10 Blackjack Results)|size:small|\n";
+			p.text += "add_spacer|small|\n";
 			p.text += "add_custom_textbox|`wInformation:|size:medium|\n";
 			p.text += "add_custom_textbox|`4/balance  `o(Shows Your Current World Lock Balance)|size:small|\n";
 			p.text += "add_custom_textbox|`4/account  `o(Opens a Menu That Displays All Your Account Informations)|size:small|\n";
@@ -1411,6 +1415,38 @@ public:
 				SendGamePacket(CLIENT, p);
 			}
 
+			return false;
+		}
+
+		else if (command == "/bj") {
+			std::string text;
+			if (Player.blackjack) {
+				text = "Blackjack counter deactivated!";
+				Player.blackjack = false;
+			}
+			else {
+				text = "Blackjack counter activated! Break a Chandelier and the gems are counted.";
+				Player.blackjack = true;
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/bjlog") {
+			Player.BjShowLog(CLIENT);
 			return false;
 		}
 
