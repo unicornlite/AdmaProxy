@@ -55,6 +55,24 @@ public:
     bool xray = false;
     bool spinInfo = false;
     bool blackjack = false;
+    /* @info: Casino hosting. While on, auto-collect only takes Diamond
+       Locks and Blue Gem Locks, and collected locks count toward the pot. */
+    bool hosting = false;
+    bool hostOwnsWorker = false;
+    int hostTaxPercent = 10;
+    /* @info: Casino pot, guarded by worldMutex. Totals only: the drop
+       packet carries no player info (the add packet's netid is -1), so
+       per-player bets cannot be verified. */
+    struct HostPot {
+        int dl = 0;
+        int bgl = 0;
+    };
+    HostPot hostPot;
+    /* @info: Drop uids the host collect worker asked for, with the time of
+       the ask. A remove for one of these counts toward the pot even when
+       the remove packet does not name the collector. Guarded by
+       worldMutex. */
+    std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> hostCollectAttempts;
     /* @info: Recent chandelier breaks, guarded by worldMutex. Gems (item
        112 drops) that appear near a break within the report window are
        summed into that break's blackjack number. */
@@ -339,6 +357,13 @@ public:
     void OnChandelierBreak(int x, int y, int puncherNetId, ENetPeer* CLIENT);
     void OnGemDrop(uint32_t uid, int amount, float x, float y);
     void BjShowLog(ENetPeer* CLIENT);
+
+    void EnsureCollectRunning(ENetPeer* CLIENT, ENetPeer* SERVER);
+    void OnHostCollect(uint32_t uid, int itemId, int amount, int collectorNetId);
+    void HostComputePayout(int& payBgl, int& payDl, int& payoutValue, int& taxValue, int& splitRemainder);
+    void HostShowPot(ENetPeer* CLIENT);
+    void HostPay(const std::string& playerName, ENetPeer* CLIENT, ENetPeer* SERVER);
+    void HostReset();
 
     void Drop(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);
     void Trash(int id, int count, ENetPeer* CLIENT, ENetPeer* SERVER);

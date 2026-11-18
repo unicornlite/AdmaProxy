@@ -102,6 +102,14 @@ time. Everything is controlled from inside the game with slash commands: type
 - `/bj` - Blackjack gems counter. When a Chandelier breaks, the gems that
   come out are counted and shown as the blackjack number (over 21 is a
   bust). `/bjlog` shows the last 10 results.
+- `/host` - Casino hosting mode. Auto-collect takes only Diamond Locks
+  and Blue Gem Locks, and the pot is tracked. Turn it off to stop.
+- `/hosttax <percent>` - Sets the host tax (default 10%).
+- `/pot` - Shows the current pot (DL + BGL + total value), the tax, and
+  the payout.
+- `/pay <player>` - Pays the winner the pot minus tax, BGL first then
+  DL. The winner must be in this world.
+- `/hostreset` - Empties the pot (after paying, or to start a new round).
 
 ### Information
 
@@ -230,6 +238,28 @@ time. Everything is controlled from inside the game with slash commands: type
   draws text at a tile position, so the console + talk bubble is the
   display. Breaks reported through multi-tile updates (type 6) are not
   seen yet, like the rest of the map tracking.
+
+## Casino hosting notes
+
+- **The pot counts what the host actually collected.** A drop counts
+  when its remove packet arrives and the host is the collector (the
+  remove packet names the collector in the open reimplementation; if
+  the official server does not, the proxy falls back to drops its own
+  collect worker asked for). Drops someone else picks up never count.
+- **Totals only, no per-player bets.** The drop packet carries no
+  player info: a new drop arrives with netid -1, and dropping only
+  broadcasts that one packet. There is no verified way to tell who
+  dropped a lock, so the pot is tracked as totals (DL + BGL).
+- **Value and tax:** 1 BGL counts as 100 DL. Tax is a percentage of
+  the total pot, default 10%, set with `/hosttax <percent>`.
+- **Payout rounding:** `/pay` pays BGL first, then DL. A BGL cannot be
+  split, so when the payout does not divide evenly the payout is
+  rounded down and the remainder goes to the tax. `/pot` shows the
+  split remainder when it applies. `/pay` clears the pot once the
+  drops are sent, so the same pot cannot be paid twice.
+- **The host must be in the same world** as the players and able to
+  pick up the drops. `/pay` drops the locks at the host's feet; the
+  winner picks them up. The winner must be in the world when paid.
 
 ## Screenshots
 

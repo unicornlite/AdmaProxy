@@ -73,9 +73,13 @@ public:
         uint32_t uid08 = static_cast<uint32_t>(pm.Uid());
         uint32_t uid14 = static_cast<uint32_t>(pm.PlantingTree());
         uint32_t removedUid = uid08 != 0xFFFFFFFFu ? uid08 : uid14;
+        int removedItemId = 0, removedAmount = 0;
         {
             std::lock_guard<std::mutex> lock(Player.worldMutex);
             auto& drops = Player.worldDrops;
+            for (const auto& d : drops) {
+                if (d.uid == removedUid) { removedItemId = d.itemId; removedAmount = d.amount; break; }
+            }
             if (uid08 != 0xFFFFFFFFu) {
                 drops.erase(std::remove_if(drops.begin(), drops.end(), [uid08](const PlayerState::WorldDrop& d) {
                     return d.uid == uid08;
@@ -88,6 +92,7 @@ public:
             }
         }
         if (Player.esp) Player.EspUnmarkDrop(CLIENT, removedUid);
+        if (Player.hosting) Player.OnHostCollect(removedUid, removedItemId, removedAmount, pm.NetID());
         return true;
     }
 };

@@ -71,6 +71,11 @@ public:
 			p.text += "add_custom_textbox|`wCasino:|size:medium|\n";
 			p.text += "add_custom_textbox|`4/bj  `o(Starts/Stops The Blackjack Gems Counter)|size:small|\n";
 			p.text += "add_custom_textbox|`4/bjlog  `o(Shows The Last 10 Blackjack Results)|size:small|\n";
+			p.text += "add_custom_textbox|`4/host  `o(Starts/Stops Casino Hosting Mode, Collects Only DL And BGL)|size:small|\n";
+			p.text += "add_custom_textbox|`4/hosttax <percent>  `o(Sets The Host Tax, Default 10%)|size:small|\n";
+			p.text += "add_custom_textbox|`4/pot  `o(Shows The Current Pot, Tax And Payout)|size:small|\n";
+			p.text += "add_custom_textbox|`4/pay <player>  `o(Pays The Winner The Pot Minus Tax)|size:small|\n";
+			p.text += "add_custom_textbox|`4/hostreset  `o(Empties The Pot)|size:small|\n";
 			p.text += "add_spacer|small|\n";
 			p.text += "add_custom_textbox|`wInformation:|size:medium|\n";
 			p.text += "add_custom_textbox|`4/balance  `o(Shows Your Current World Lock Balance)|size:small|\n";
@@ -718,6 +723,7 @@ public:
 			if (Player.autocollect.running) {
 				text = "Stopped auto-collect!";
 				Player.autocollect.running = false;
+				Player.hostOwnsWorker = false;
 			}
 			else {
 				text = "Activated auto-collect! Walking to nearby drops automatically.";
@@ -1447,6 +1453,113 @@ public:
 
 		else if (command == "/bjlog") {
 			Player.BjShowLog(CLIENT);
+			return false;
+		}
+
+		else if (command == "/host") {
+			std::string text;
+			if (Player.hosting) {
+				Player.hosting = false;
+				if (Player.hostOwnsWorker) {
+					Player.autocollect.running = false;
+					Player.hostOwnsWorker = false;
+					text = "Hosting mode deactivated! Auto-collect stopped.";
+				}
+				else text = "Hosting mode deactivated! Auto-collect takes all drops again.";
+			}
+			else {
+				text = "Hosting mode activated! Auto-collect takes only DL and BGL, and the pot is tracked.";
+				Player.hosting = true;
+				if (!Player.autocollect.running) {
+					Player.EnsureCollectRunning(CLIENT, SERVER);
+					Player.hostOwnsWorker = true;
+				}
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/hosttax" || Packet::Contains(command, "/hosttax ")) {
+			std::string text;
+			if (command == "/hosttax") {
+				text = "Host tax is " + std::to_string(Player.hostTaxPercent) + "%. Usage: /hosttax <0 - 100>";
+			}
+			else {
+				std::string rest = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				int pct = -1;
+				try { pct = std::stoi(rest); } catch (...) { pct = -1; }
+				if (pct < 0 || pct > 100) {
+					text = "Invalid tax. Usage: /hosttax <0 - 100>";
+				}
+				else {
+					Player.hostTaxPercent = pct;
+					text = "Host tax set to " + std::to_string(pct) + "%.";
+				}
+			}
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w " + text;
+				SendGamePacket(CLIENT, p);
+			}
+
+			return false;
+		}
+
+		else if (command == "/pot") {
+			Player.HostShowPot(CLIENT);
+			return false;
+		}
+
+		else if (command == "/pay" || Packet::Contains(command, "/pay ")) {
+			if (command == "/pay") {
+				GamePacket<OnConsoleMessage> p;
+				p.text = "Usage: /pay <player name>";
+				SendGamePacket(CLIENT, p);
+			}
+			else {
+				std::string name = Packet::ExtractCustom<std::string>(command, " ", 1, "\n");
+				Player.HostPay(name, CLIENT, SERVER);
+			}
+			return false;
+		}
+
+		else if (command == "/hostreset") {
+			Player.HostReset();
+
+			{
+				GamePacket<OnConsoleMessage> p;
+				p.text = "Pot cleared.";
+				SendGamePacket(CLIENT, p);
+			}
+
+			{
+				GamePacket<OnTalkBubble> p;
+				p.netId = Player.netID;
+				p.text = "`o[`4" + Main.NAME + "`o]`w`w`w Pot cleared.";
+				SendGamePacket(CLIENT, p);
+			}
+
 			return false;
 		}
 

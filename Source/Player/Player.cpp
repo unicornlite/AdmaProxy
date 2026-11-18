@@ -56,6 +56,10 @@ constexpr int ITEM_GEMS = 112;
 constexpr int BJ_WINDOW_MS = 2500;
 constexpr size_t BJ_HISTORY_MAX = 10;
 
+// Batch 4: Diamond Lock (DL) and Blue Gem Lock (BGL) for casino hosting.
+constexpr int ITEM_DIAMOND_LOCK = 1796;
+constexpr int ITEM_BLUE_GEM_LOCK = 7188;
+
 inline uint64_t EspKey(int x, int y) {
     return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) | static_cast<uint32_t>(y);
 }
@@ -129,6 +133,12 @@ void PlayerState::Reset() {
     xray = false;
     spinInfo = false;
     blackjack = false;
+    hosting = false;
+    hostOwnsWorker = false;
+    hostTaxPercent = 10;
+    hostPot.dl = 0;
+    hostPot.bgl = 0;
+    hostCollectAttempts.clear();
     pathfind.running = false;
     pathfind.destX = -1;
     pathfind.destY = -1;
@@ -564,6 +574,7 @@ void PlayerState::ClearWorld() {
     bjEvents.clear();
     bjDropAmounts.clear();
     bjDropEvent.clear();
+    hostCollectAttempts.clear();
     speed.synced = false;
     noclipState.synced = false;
     autocollect.targetX = 0.0f;
@@ -658,6 +669,7 @@ void PlayerState::AutoCollectLoop(ENetPeer* CLIENT, ENetPeer* SERVER) {
             auto now = std::chrono::steady_clock::now();
             float best = 0.0f;
             for (const auto& drop : worldDrops) {
+                if (hosting && drop.itemId != ITEM_DIAMOND_LOCK && drop.itemId != ITEM_BLUE_GEM_LOCK) continue;
                 auto it = autocollect.attempts.find(drop.uid);
                 if (it != autocollect.attempts.end() && now - it->second < std::chrono::seconds(3)) continue;
                 float dx = drop.x - position.x, dy = drop.y - position.y;
@@ -691,6 +703,11 @@ void PlayerState::AutoCollectLoop(ENetPeer* CLIENT, ENetPeer* SERVER) {
             std::lock_guard<std::mutex> lock(worldMutex);
             auto now = std::chrono::steady_clock::now();
             autocollect.attempts[target.uid] = now;
+            if (hosting) hostCollectAttempts[target.uid] = now;
+            for (auto it = hostCollectAttempts.begin(); it != hostCollectAttempts.end();) {
+                if (now - it->second > std::chrono::seconds(5)) it = hostCollectAttempts.erase(it);
+                else ++it;
+            }
             for (auto it = autocollect.attempts.begin(); it != autocollect.attempts.end();) {
                 if (now - it->second > std::chrono::seconds(5)) it = autocollect.attempts.erase(it);
                 else ++it;
@@ -1745,4 +1762,128 @@ void PlayerState::BjShowLog(ENetPeer* CLIENT) {
     GamePacket<OnConsoleMessage> p;
     p.text = text;
     SendGamePacket(CLIENT, p);
+}
+
+// ---------------- Batch 4: casino hosting ----------------
+
+void PlayerState::EnsureCollectRunning(ENetPeer* CLIENT, ENetPeer* SERVER) {
+    if (autocollect.running) return;
+    autocollect.running = true;
+    autocollect.worker = std::thread(&PlayerState::AutoCollectLoop, this, CLIENT, SERVER);
+    autocollect.worker.detach();
+}
+
+void PlayerState::OnHostCollect(uint32_t uid, int itemId, int amount, int collectorNetId) {
+    /* @info: A drop vanished while hosting. It counts toward the pot when
+       the host collected it: either the remove packet names the host as
+       the collector (Gurotopia's layout), or the host worker asked for
+       this drop recently (covers a remove packet that names nobody). */
+    if (!hosting) return;
+    if (itemId != ITEM_DIAMOND_LOCK && itemId != ITEM_BLUE_GEM_LOCK) return;
+    std::lock_guard<std::mutex> lock(worldMutex);
+    bool mine = collectorNetId == netID;
+    if (!mine) {
+        auto it = hostCollectAttempts.find(uid);
+        mine = it != hostCollectAttempts.end() &&
+            std::chrono::steady_clock::now() - it->second < std::chrono::seconds(5);
+    }
+    if (!mine) return;
+    if (itemId == ITEM_DIAMOND_LOCK) hostPot.dl += amount;
+    else hostPot.bgl += amount;
+    LOG_INFO("Host pot: +{} {} (now {} DL + {} BGL)", amount,
+        itemId == ITEM_DIAMOND_LOCK ? "DL" : "BGL", hostPot.dl, hostPot.bgl);
+}
+
+void PlayerState::HostComputePayout(int& payBgl, int& payDl, int& payoutValue, int& taxValue, int& splitRemainder) {
+    /* @info: Payout math. Total value counts 1 BGL as 100 DL. Tax is a
+       percentage of the total, rounded down. The payout is paid BGL first
+       then DL; a BGL cannot be split, so any value that cannot be paid in
+       whole locks is rounded down and added to the tax. */
+    std::lock_guard<std::mutex> lock(worldMutex);
+    int total = hostPot.dl + hostPot.bgl * 100;
+    int tax = total * hostTaxPercent / 100;
+    int payout = total - tax;
+    payBgl = std::min(payout / 100, hostPot.bgl);
+    int remain = payout - payBgl * 100;
+    payDl = std::min(remain, hostPot.dl);
+    payoutValue = payBgl * 100 + payDl;
+    splitRemainder = payout - payoutValue;
+    taxValue = tax + splitRemainder;
+}
+
+void PlayerState::HostShowPot(ENetPeer* CLIENT) {
+    int payBgl = 0, payDl = 0, payoutValue = 0, taxValue = 0, splitRemainder = 0;
+    HostComputePayout(payBgl, payDl, payoutValue, taxValue, splitRemainder);
+    int dl = 0, bgl = 0, taxPct = 10;
+    {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        dl = hostPot.dl;
+        bgl = hostPot.bgl;
+        taxPct = hostTaxPercent;
+    }
+    std::string text = "Pot: " + std::to_string(bgl) + " BGL + " + std::to_string(dl) +
+        " DL (" + std::to_string(bgl * 100 + dl) + " DL total)";
+    text += "\nTax (" + std::to_string(taxPct) + "%): " + std::to_string(taxValue) + " DL";
+    if (splitRemainder > 0) text += " (includes " + std::to_string(splitRemainder) + " DL from an unpayable BGL split)";
+    text += "\nPayout: " + std::to_string(payoutValue) + " DL (" +
+        std::to_string(payBgl) + " BGL + " + std::to_string(payDl) + " DL)";
+    GamePacket<OnConsoleMessage> p;
+    p.text = text;
+    SendGamePacket(CLIENT, p);
+}
+
+void PlayerState::HostPay(const std::string& playerName, ENetPeer* CLIENT, ENetPeer* SERVER) {
+    /* @info: Pays the winner the pot minus tax, BGL first then DL. The pot
+       is cleared once the drops are sent, so a second /pay cannot pay the
+       same pot twice; /hostreset is for starting a new round unpaid. The
+       winner must be in this world: the locks are dropped at the host's
+       feet and the winner picks them up. */
+    int foundNetID = -1;
+    for (const auto& pair : worldPlayers) {
+        if (pair.second == playerName) { foundNetID = pair.first; break; }
+    }
+    if (foundNetID == -1) {
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Player [" + playerName + "] is not in this world.";
+        SendGamePacket(CLIENT, p);
+        return;
+    }
+    int payBgl = 0, payDl = 0, payoutValue = 0, taxValue = 0, splitRemainder = 0;
+    HostComputePayout(payBgl, payDl, payoutValue, taxValue, splitRemainder);
+    if (payoutValue <= 0) {
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Pot is empty, nothing to pay.";
+        SendGamePacket(CLIENT, p);
+        return;
+    }
+    if (GetItemCount(ITEM_BLUE_GEM_LOCK) < payBgl || GetItemCount(ITEM_DIAMOND_LOCK) < payDl) {
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Not enough locks in the inventory to pay the pot. Use /hostreset to start over.";
+        SendGamePacket(CLIENT, p);
+        return;
+    }
+    std::thread([this, playerName, payBgl, payDl, payoutValue, taxValue, CLIENT, SERVER]() {
+        if (payBgl > 0) {
+            Drop(ITEM_BLUE_GEM_LOCK, payBgl, CLIENT, SERVER);
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        }
+        if (payDl > 0) Drop(ITEM_DIAMOND_LOCK, payDl, CLIENT, SERVER);
+        {
+            std::lock_guard<std::mutex> lock(worldMutex);
+            hostPot.dl = 0;
+            hostPot.bgl = 0;
+        }
+        GamePacket<OnConsoleMessage> p;
+        p.text = "Paid [" + playerName + "] " + std::to_string(payBgl) + " BGL + " +
+            std::to_string(payDl) + " DL (" + std::to_string(payoutValue) +
+            " DL, tax " + std::to_string(taxValue) + " DL). Pot cleared.";
+        SendGamePacket(CLIENT, p);
+    }).detach();
+}
+
+void PlayerState::HostReset() {
+    std::lock_guard<std::mutex> lock(worldMutex);
+    hostPot.dl = 0;
+    hostPot.bgl = 0;
+    hostCollectAttempts.clear();
 }
